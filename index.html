@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<title>カザーン タイミング</title>
+<style>
+:root{--bg:#111;--fg:#eee;--mut:#9a9a9a;--acc:#f5c542;--ok:#3ddc84;--ng:#ff5a4f;--panel:#1b1b1b;--line:#333;--cy:#39d0ff}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif;-webkit-tap-highlight-color:transparent}
+body{min-height:100vh;overscroll-behavior:none;padding-bottom:40px}
+#stage{position:relative;background:#000;display:flex;justify-content:center}
+#view{display:block;touch-action:none;background:#000}
+#hint{position:absolute;left:8px;right:8px;top:8px;padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.7);font-size:14px;pointer-events:none}
+#hint:empty{display:none}
+#video{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
+#flash{position:fixed;inset:0;background:var(--acc);opacity:0;pointer-events:none;transition:opacity .3s ease-out;z-index:10}
+#flash.on{opacity:.55;transition:none}
+#panel{padding:10px 16px;max-width:720px;margin:0 auto}
+.status{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+#spd{font-size:40px;font-weight:700;font-variant-numeric:tabular-nums}
+#spd small{font-size:14px;font-weight:400;color:var(--mut);margin-left:4px}
+#tier{font-size:22px;font-weight:700;padding:4px 12px;border-radius:8px;background:#333}
+#tier.ok{background:var(--ok);color:#000}
+#tier.ng{background:#552;color:#ddd}
+#cd{font-size:15px;color:var(--mut);margin:2px 0 6px;min-height:1.3em}
+canvas.wide{width:100%;display:block;border-radius:8px;background:var(--panel)}
+#bar{height:56px;margin-top:4px}
+#graph{height:90px;margin-top:8px}
+section,details{margin-top:14px;padding:12px;border-radius:10px;background:var(--panel)}
+h3{margin:0 0 8px;font-size:15px;color:var(--acc)}
+summary{font-weight:700;color:var(--acc);cursor:pointer}
+.btns{display:flex;flex-wrap:wrap;gap:8px}
+button,.btn{appearance:none;border:1px solid #444;background:#2a2a2a;color:var(--fg);font-size:16px;padding:12px 14px;border-radius:10px;cursor:pointer;flex:1 1 auto;text-align:center;min-width:88px}
+button:active,.btn:active{background:#3a3a3a}
+button.sel{border-color:var(--cy);background:#10323d}
+button.big{font-size:22px;font-weight:700;padding:18px;background:#5a3b00;border-color:var(--acc)}
+.offrow{display:flex;align-items:center;gap:8px}
+#offv{min-width:90px;text-align:center;font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--acc)}
+.help{font-size:13px;color:var(--mut);line-height:1.55;margin:8px 0 0}
+.set{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;margin:10px 0}
+.set label{font-size:14px}
+.set output{font-size:14px;color:var(--acc);font-variant-numeric:tabular-nums}
+.set input[type=range]{grid-column:1/3}
+.chk{display:flex;flex-wrap:wrap;gap:14px;margin:10px 0;font-size:15px}
+.chk input{transform:scale(1.3);margin-right:6px}
+#swatch{display:inline-block;width:18px;height:18px;border-radius:4px;vertical-align:middle;border:1px solid #666;margin-left:6px}
+#res{font-size:20px;font-weight:700;text-align:center;min-height:1.4em;margin-top:8px}
+#counts{font-size:14px;color:var(--mut);margin-top:8px}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="view" width="960" height="540"></canvas><div id="hint">「カメラ開始」または「デモ」を押してください</div></div>
+<video id="video" playsinline muted autoplay></video>
+<div id="flash"></div>
+
+<div id="panel">
+  <div class="status">
+    <div id="spd"><span id="sppv">--</span><small>秒/穴</small></div>
+    <div id="tier">未計測</div>
+  </div>
+  <canvas id="bar" class="wide"></canvas>
+  <div id="cd"></div>
+  <canvas id="graph" class="wide"></canvas>
+
+  <div id="practice" hidden>
+    <section>
+      <h3>練習（デモ）</h3>
+      <button id="fire" class="big">発射</button>
+      <div id="res"></div>
+      <p class="help">デモではボタンを押してから約0.7秒でボールが落ちます。つまり理想のオフセットは約700msです。スペースキーでも発射できます。</p>
+    </section>
+  </div>
+
+  <section>
+    <h3>1. 映像</h3>
+    <div class="btns">
+      <button id="bCam">カメラ開始</button>
+      <label class="btn">動画ファイル<input type="file" id="fileIn" accept="video/*" hidden></label>
+      <button id="bDemo">デモ</button>
+    </div>
+    <div id="zoomRow" class="set" hidden><label>ズーム</label><output id="zoomv"></output><input type="range" id="zoom"></div>
+  </section>
+
+  <section>
+    <h3>2. 初期設定（上から順にタップ）</h3>
+    <div class="btns">
+      <button data-mode="roi">① 範囲</button>
+      <button data-mode="color">② UP色<span id="swatch"></span></button>
+      <button data-mode="target">③ 落下位置</button>
+    </div>
+    <p class="help">① 1段目リングの帯を左端から右端まで指でなぞって囲む（金色のUP看板が入る高さで、上の段や炎は入れない）<br>② 金色のUP看板をタップして色を覚えさせる<br>③ ボールがリングに落ちる位置をタップ（水色の線）</p>
+  </section>
+
+  <section>
+    <h3>3. タイミング調整</h3>
+    <div class="offrow">
+      <button id="early">早かった</button>
+      <output id="offv">600ms</output>
+      <button id="late">遅かった</button>
+    </div>
+    <input type="range" id="off" min="0" max="2500" step="10">
+    <div class="btns" style="margin-top:8px"><button id="hit">UP入った</button><button id="rstc">記録リセット</button></div>
+    <div id="counts"></div>
+    <p class="help">最後の高い「ピーン」に合わせて台のボタンを押します。ボールが落ちたときに、UPがまだ来ていなければ「早かった」、UPが通り過ぎていれば「遅かった」を押してください。1回押すごとに20msずつ補正します。</p>
+  </section>
+
+  <details>
+    <summary>詳細設定</summary>
+    <div class="set"><label>打てる速度（1穴あたり秒以上）</label><output data-o="slowThr"></output><input type="range" data-k="slowThr" min="0.6" max="1.1" step="0.01"></div>
+    <div class="chk">
+      <label><input type="checkbox" data-k="onlySlow">遅い時だけ合図</label>
+      <label><input type="checkbox" data-k="sound">音</label>
+      <label><input type="checkbox" data-k="vib">バイブ</label>
+      <label><input type="checkbox" data-k="flash">画面フラッシュ</label>
+      <label><input type="checkbox" data-k="showMask">検出表示</label>
+    </div>
+    <div class="set"><label>カウント音の数</label><output data-o="beeps"></output><input type="range" data-k="beeps" min="1" max="4" step="1"></div>
+    <div class="set"><label>カウント間隔(ms)</label><output data-o="beepGap"></output><input type="range" data-k="beepGap" min="200" max="600" step="10"></div>
+    <div class="set"><label>色相の許容幅(°)</label><output data-o="hueTol"></output><input type="range" data-k="hueTol" min="4" max="40" step="1"></div>
+    <div class="set"><label>彩度の下限</label><output data-o="satMin"></output><input type="range" data-k="satMin" min="0.05" max="0.9" step="0.01"></div>
+    <div class="set"><label>明度の下限</label><output data-o="valMin"></output><input type="range" data-k="valMin" min="0.05" max="0.9" step="0.01"></div>
+    <div class="set"><label>速度計測の窓(ms)</label><output data-o="win"></output><input type="range" data-k="win" min="300" max="1500" step="50"></div>
+    <div class="set"><label>1段目の穴の総数</label><output data-o="pockets"></output><input type="range" data-k="pockets" min="12" max="36" step="1"></div>
+    <div class="set"><label>UP穴の数</label><output data-o="ups"></output><input type="range" data-k="ups" min="2" max="12" step="1"></div>
+    <button id="reset">設定を初期化</button>
+  </details>
+</div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const view = $('#view'), vctx = view.getContext('2d', {willReadFrequently: true});
+const video = $('#video');
+const proc = document.createElement('canvas'), pctx = proc.getContext('2d', {willReadFrequently: true});
+const D2R = Math.PI / 180;
+
+// ---------- settings ----------
+const DEF = {src: {}, hue: 48, hueTol: 14, satMin: 0.40, valMin: 0.45, offset: 600, slowThr: 0.93,
+  pockets: 24, ups: 8, sound: true, vib: true, flash: true, onlySlow: true, beeps: 3, beepGap: 350,
+  showMask: true, win: 700};
+let S = structuredClone(DEF);
+try { Object.assign(S, JSON.parse(localStorage.getItem('kzn-settings') || '{}')); } catch (e) {}
+function save() { try { localStorage.setItem('kzn-settings', JSON.stringify(S)); } catch (e) {} }
+
+let source = 'none', gen = 0, stream = null, actx = null, mode = 'none';
+const src = () => (S.src[source] ||= {roi: null, targetX: 0.5});
+
+// ---------- tracking state ----------
+const T = {blobs: [], hist: [], unw: null, lastPsi: 0, lastT: 0, fitOk: false, omega: 0, fitT: 0, fitU: 0,
+  spp: null, R: 0, sppHist: [], mask: null, mw: 0, mh: 0, next: null, status: ''};
+
+function hsv(r, g, b) {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), c = mx - mn;
+  let h = 0;
+  if (c) {
+    if (mx === r) h = ((g - b) / c) % 6; else if (mx === g) h = (b - r) / c + 2; else h = (r - g) / c + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  return [h, mx ? c / mx : 0, mx / 255];
+}
+function hueDist(a, b) { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+
+function roiPx() {
+  const r = src().roi; if (!r) return null;
+  return {x: r.x * view.width, y: r.y * view.height, w: r.w * view.width, h: r.h * view.height};
+}
+
+function lost(t, why) { T.fitOk = false; T.status = why; if (t - T.lastT > 500) { T.unw = null; T.hist = []; } }
+
+function process(t) {
+  T.blobs = []; T.mask = null;
+  const r = roiPx();
+  if (!r) { T.fitOk = false; T.status = '範囲が未設定です（① 範囲）'; return; }
+  const PW = 240, PH = Math.max(6, Math.min(80, Math.round(PW * r.h / r.w)));
+  if (proc.width !== PW) proc.width = PW;
+  if (proc.height !== PH) proc.height = PH;
+  pctx.drawImage(view, r.x, r.y, r.w, r.h, 0, 0, PW, PH);
+  const d = pctx.getImageData(0, 0, PW, PH).data;
+  const col = new Float32Array(PW), mask = new Uint8Array(PW * PH);
+  for (let y = 0; y < PH; y++) for (let x = 0; x < PW; x++) {
+    const i = (y * PW + x) * 4, [h, s, v] = hsv(d[i], d[i + 1], d[i + 2]);
+    if (s >= S.satMin && v >= S.valMin && hueDist(h, S.hue) <= S.hueTol) { col[x]++; mask[y * PW + x] = 1; }
+  }
+  T.mask = mask; T.mw = PW; T.mh = PH;
+
+  // smooth column profile, find gold blobs
+  const sm = new Float32Array(PW); let mx = 0;
+  for (let x = 0; x < PW; x++) {
+    let s = 0, n = 0;
+    for (let k = -2; k <= 2; k++) { const j = x + k; if (j >= 0 && j < PW) { s += col[j]; n++; } }
+    sm[x] = s / n / PH; if (sm[x] > mx) mx = sm[x];
+  }
+  if (mx < 0.04) return lost(t, 'UPの金色が見つかりません（② UP色）');
+  const thr = Math.max(0.04, mx * 0.35);
+  for (let x = 0; x < PW;) {
+    if (sm[x] <= thr) { x++; continue; }
+    let s = 0, sx = 0; const x0 = x;
+    while (x < PW && sm[x] > thr) { s += sm[x]; sx += sm[x] * x; x++; }
+    if (x - x0 >= 2) {
+      const xc = sx / s, u = (xc + 0.5) / PW * 2 - 1;
+      T.blobs.push({xc, u, th: Math.asin(Math.max(-1, Math.min(1, u))) / D2R, s});
+    }
+  }
+
+  // phase of the UP lattice (UPs are evenly spaced every P degrees) via circular mean
+  const P = 360 / S.ups; let cx = 0, cy = 0, ws = 0;
+  for (const b of T.blobs) {
+    if (Math.abs(b.th) > 72) continue;
+    const w = b.s * Math.cos(b.th * D2R), a = b.th * S.ups * D2R;
+    cx += w * Math.cos(a); cy += w * Math.sin(a); ws += w;
+  }
+  if (ws <= 0) return lost(t, 'UPが見えません');
+  T.R = Math.hypot(cx, cy) / ws;
+  if (T.R < 0.5) return lost(t, '検出が不安定です（範囲や色を見直してください）');
+  const psi = Math.atan2(cy, cx) / D2R / S.ups;
+
+  if (T.unw === null || t - T.lastT > 500) { T.unw = psi; T.hist = []; }
+  else { let dd = psi - T.lastPsi; dd -= P * Math.round(dd / P); T.unw += dd; }
+  T.lastPsi = psi; T.lastT = t;
+  T.hist.push({t, u: T.unw});
+  while (T.hist.length && t - T.hist[0].t > S.win) T.hist.shift();
+
+  // linear fit of unwrapped phase -> angular velocity
+  const N = T.hist.length;
+  if (N < 5 || t - T.hist[0].t < S.win * 0.4) { T.fitOk = false; T.status = '計測中…'; return; }
+  const t0 = T.hist[0].t; let st = 0, su = 0, stt = 0, stu = 0;
+  for (const h of T.hist) { const x = (h.t - t0) / 1000; st += x; su += h.u; stt += x * x; stu += x * h.u; }
+  const om = (N * stu - st * su) / (N * stt - st * st), b0 = (su - om * st) / N;
+  T.omega = om; T.fitT = t; T.fitU = b0 + om * (t - t0) / 1000; T.fitOk = true; T.status = '';
+  T.spp = Math.abs(om) > 0.5 ? (360 / S.pockets) / Math.abs(om) : Infinity;
+  T.sppHist.push({t: performance.now(), v: T.spp});
+  while (T.sppHist.length && performance.now() - T.sppHist[0].t > 60000) T.sppHist.shift();
+}
+
+// ---------- prediction & cues ----------
+const targetTh = () => Math.asin(src().targetX * 2 - 1) / D2R;
+function nextFire(now) {
+  if (!T.fitOk || !isFinite(T.spp)) return null;
+  const P = 360 / S.ups, om = T.omega, aom = Math.abs(om), sg = Math.sign(om);
+  const ph = T.fitU + om * (now - T.fitT) / 1000;
+  let delta = ((targetTh() - ph) * sg) % P; if (delta < 0) delta += P;
+  const perMs = P / aom * 1000;
+  let F = now + delta / aom * 1000 - S.offset;
+  while (F < now - 30) F += perMs;
+  return {F, perMs};
+}
+const speedOk = () => T.fitOk && T.spp >= S.slowThr;
+
+let plan = null;
+function schedule(now) {
+  const nf = nextFire(now);
+  const ok = nf && (!S.onlySlow || speedOk());
+  T.next = nf;
+  if (plan && now > plan.F + 200) plan = null;
+  if (!ok) { if (plan && plan.F > now) { cancelPlan(plan); plan = null; } return; }
+  if (plan) {
+    const diff = nf.F - plan.F;
+    if (Math.abs(diff) > nf.perMs / 2) { if (plan.F > now) { cancelPlan(plan); plan = null; } else return; }
+    else if (Math.abs(diff) > 15 && plan.F > now + 30) { cancelPlan(plan); plan = null; }
+    else return;
+  }
+  if (nf.F - now <= (S.beeps - 1) * S.beepGap + 300) plan = makePlan(nf.F, now);
+}
+function makePlan(F, now) {
+  const p = {F, nodes: [], timers: []};
+  for (let i = 0; i < S.beeps; i++) {
+    const tt = F - (S.beeps - 1 - i) * S.beepGap;
+    if (tt < now + 15) continue;
+    const last = i === S.beeps - 1, delay = tt - now;
+    if (S.sound) p.nodes.push(beep(tt, last));
+    if (S.vib && navigator.vibrate) p.timers.push(setTimeout(() => navigator.vibrate(last ? 120 : 30), delay));
+    if (last && S.flash) p.timers.push(setTimeout(doFlash, delay));
+  }
+  return p;
+}
+function cancelPlan(p) {
+  for (const o of p.nodes) if (o) try { o.stop(); } catch (e) {}
+  for (const id of p.timers) clearTimeout(id);
+}
+function beep(tMs, last) {
+  if (!actx) return null;
+  const lat = actx.outputLatency || actx.baseLatency || 0;
+  const at = actx.currentTime + (tMs - performance.now()) / 1000 - lat;
+  if (at <= actx.currentTime) return null;
+  const o = actx.createOscillator(), g = actx.createGain(), len = last ? 0.14 : 0.06;
+  o.type = 'square'; o.frequency.value = last ? 1760 : 880;
+  g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(0.25, at + 0.003);
+  g.gain.setValueAtTime(0.25, at + len); g.gain.linearRampToValueAtTime(0, at + len + 0.02);
+  o.connect(g).connect(actx.destination); o.start(at); o.stop(at + len + 0.05);
+  return o;
+}
+function doFlash() { const f = $('#flash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on'))); }
+function ensureAudio() {
+  if (!actx) try { actx = new (window.AudioContext || window.webkitAudioContext)({latencyHint: 'interactive'}); } catch (e) {}
+  if (actx && actx.state === 'suspended') actx.resume();
+}
+
+// ---------- overlay ----------
+function drawOverlay() {
+  const r = roiPx();
+  if (r && T.mask && S.showMask) {
+    const sx = r.w / T.mw, sy = r.h / T.mh;
+    vctx.fillStyle = 'rgba(255,0,255,.45)';
+    for (let y = 0; y < T.mh; y++) for (let x = 0; x < T.mw; x++)
+      if (T.mask[y * T.mw + x]) vctx.fillRect(r.x + x * sx, r.y + y * sy, sx + .5, sy + .5);
+  }
+  if (r) {
+    vctx.lineWidth = 2; vctx.strokeStyle = 'rgba(255,255,255,.8)'; vctx.strokeRect(r.x, r.y, r.w, r.h);
+    const cx = r.x + r.w / 2, R = r.w / 2;
+    // predicted UP positions from fitted phase
+    if (T.fitOk) {
+      const P = 360 / S.ups, ph = (T.fitU + T.omega * (performance.now() - T.fitT) / 1000) % P;
+      vctx.fillStyle = speedOk() ? '#3ddc84' : '#f5c542';
+      for (let k = -6; k <= 6; k++) {
+        const th = ph + k * P; if (Math.abs(th) >= 88) continue;
+        const x = cx + R * Math.sin(th * D2R);
+        vctx.beginPath(); vctx.moveTo(x, r.y - 2); vctx.lineTo(x - 8, r.y - 14); vctx.lineTo(x + 8, r.y - 14); vctx.fill();
+      }
+    }
+    const tx = r.x + src().targetX * r.w;
+    vctx.strokeStyle = '#39d0ff'; vctx.lineWidth = 3;
+    vctx.beginPath(); vctx.moveTo(tx, r.y - 20); vctx.lineTo(tx, r.y + r.h + 10); vctx.stroke();
+  }
+  if (drag) {
+    vctx.strokeStyle = '#39d0ff'; vctx.setLineDash([6, 4]); vctx.lineWidth = 2;
+    vctx.strokeRect(drag.x0, drag.y0, drag.x1 - drag.x0, drag.y1 - drag.y0); vctx.setLineDash([]);
+  }
+}
+
+function frame(t) {
+  process(t);
+  drawOverlay();
+  schedule(performance.now());
+}
+
+// ---------- sources ----------
+function stopAll() {
+  gen++;
+  if (stream) { stream.getTracks().forEach(tr => tr.stop()); stream = null; }
+  video.pause(); video.removeAttribute('src'); video.srcObject = null;
+  $('#practice').hidden = true; $('#zoomRow').hidden = true;
+  T.unw = null; T.hist = []; T.sppHist = []; T.fitOk = false;
+  if (plan) { cancelPlan(plan); plan = null; }
+}
+function sizeTo(w, h) { const sc = Math.min(1, 1280 / w); view.width = Math.round(w * sc); view.height = Math.round(h * sc); fit(); }
+function videoLoop() {
+  const g = gen;
+  if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+    const cb = (now, meta) => {
+      if (g !== gen) return;
+      let t = source === 'camera' ? meta.captureTime : meta.presentationTime;
+      const pn = performance.now();
+      if (!(t <= pn && t > pn - 500)) t = now;
+      vctx.drawImage(video, 0, 0, view.width, view.height);
+      frame(t);
+      video.requestVideoFrameCallback(cb);
+    };
+    video.requestVideoFrameCallback(cb);
+  } else {
+    let last = -1;
+    const f = () => {
+      if (g !== gen) return;
+      if (video.currentTime !== last && video.readyState >= 2) {
+        last = video.currentTime; vctx.drawImage(video, 0, 0, view.width, view.height); frame(performance.now());
+      }
+      requestAnimationFrame(f);
+    };
+    requestAnimationFrame(f);
+  }
+}
+async function startCamera() {
+  ensureAudio(); stopAll(); source = 'camera';
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: false,
+      video: {facingMode: {ideal: 'environment'}, width: {ideal: 1280}, height: {ideal: 720}, frameRate: {ideal: 60}}});
+  } catch (e) { hint('カメラを起動できません: ' + e.message + '（HTTPSで開いているか、カメラの許可を確認してください）'); source = 'none'; return; }
+  video.srcObject = stream; await video.play().catch(() => {});
+  await new Promise(r => video.videoWidth ? r() : video.addEventListener('loadedmetadata', r, {once: true}));
+  sizeTo(video.videoWidth, video.videoHeight);
+  const tr = stream.getVideoTracks()[0], cap = tr.getCapabilities ? tr.getCapabilities() : {};
+  if (cap.zoom) {
+    const z = $('#zoom'); z.min = cap.zoom.min; z.max = cap.zoom.max; z.step = cap.zoom.step || 0.1;
+    z.value = tr.getSettings().zoom || cap.zoom.min; $('#zoomv').textContent = (+z.value).toFixed(1) + 'x';
+    z.oninput = () => { tr.applyConstraints({advanced: [{zoom: +z.value}]}); $('#zoomv').textContent = (+z.value).toFixed(1) + 'x'; };
+    $('#zoomRow').hidden = false;
+  }
+  try { await navigator.wakeLock?.request('screen'); } catch (e) {}
+  afterStart(); videoLoop();
+}
+async function startFile(f) {
+  ensureAudio(); stopAll(); source = 'file';
+  video.src = URL.createObjectURL(f); video.loop = true; video.muted = true;
+  await new Promise(r => video.addEventListener('loadedmetadata', r, {once: true}));
+  sizeTo(video.videoWidth, video.videoHeight);
+  await video.play().catch(() => {});
+  afterStart(); videoLoop();
+}
+function afterStart() {
+  if (!src().roi) setMode('roi'); else hint('');
+}
+
+// ---------- demo (synthetic machine for testing & practice) ----------
+const PATTERN = ['OUT', 'OUT', 'UP', 'OUT', 'DIA', 'UP'];
+const TIERS = [1.0, 0.86, 0.75, 0.66];
+const demo = {base: 0, spp: 1.0, target: 1.0, nextChange: 0, lastT: 0, delay: 700};
+function startDemo() {
+  ensureAudio(); stopAll(); source = 'demo';
+  view.width = 960; view.height = 540; fit();
+  if (!src().roi) { src().roi = {x: 180 / 960, y: 335 / 540, w: 600 / 960, h: 60 / 540}; src().targetX = 0.5; save(); }
+  $('#practice').hidden = false; hint('');
+  const g = gen; demo.lastT = 0; demo.nextChange = 0;
+  const f = now => {
+    if (g !== gen) return;
+    demoStep(now); frame(now); requestAnimationFrame(f);
+  };
+  requestAnimationFrame(f);
+}
+function demoStep(now) {
+  const dt = demo.lastT ? Math.min(0.1, (now - demo.lastT) / 1000) : 0; demo.lastT = now;
+  if (now > demo.nextChange) { demo.target = TIERS[Math.floor(Math.random() * TIERS.length)]; demo.nextChange = now + 10000 + Math.random() * 12000; }
+  demo.spp += (demo.target - demo.spp) * Math.min(1, dt * 2);
+  demo.base = (demo.base + (360 / 24) / demo.spp * dt) % 360;
+  const c = vctx, W = 960, cx = 480, R = 300, y0 = 340, h = 50;
+  const gr = c.createLinearGradient(0, 0, 0, 540); gr.addColorStop(0, '#1a0c08'); gr.addColorStop(1, '#3a1a10');
+  c.fillStyle = gr; c.fillRect(0, 0, W, 540);
+  c.fillStyle = '#ffd23a'; c.fillRect(40, 0, 16, 540); c.fillRect(904, 0, 16, 540); // neon tubes (distractors)
+  c.fillStyle = '#7a2c1a'; c.beginPath(); c.ellipse(cx, 250, 220, 50, 0, 0, Math.PI * 2); c.fill(); // upper tier
+  c.fillStyle = '#e8a020'; c.fillRect(420, 230, 40, 30); // gold decoration on upper tier
+  c.fillStyle = '#5a2414'; c.fillRect(cx - R, y0 - 10, 2 * R, h + 40);
+  for (let i = 0; i < 24; i++) {
+    let th = ((demo.base + i * 15) % 360 + 540) % 360 - 180;
+    if (Math.abs(th) > 86) continue;
+    const xa = cx + R * Math.sin(Math.max(-90, th - 7) * D2R), xb = cx + R * Math.sin(Math.min(90, th + 7) * D2R);
+    const type = PATTERN[i % 6];
+    c.fillStyle = '#6d6d6d'; c.fillRect(xa, y0 + 25, xb - xa, 25);
+    c.fillStyle = type === 'UP' ? '#d8b23c' : type === 'DIA' ? '#6a3a9a' : '#6a1712';
+    c.fillRect(xa, y0, xb - xa, 25);
+    if (xb - xa > 18) { c.fillStyle = type === 'UP' ? '#3a2a00' : '#eee'; c.font = 'bold 14px sans-serif'; c.textAlign = 'center'; c.fillText(type === 'DIA' ? '◆' : type, (xa + xb) / 2, y0 + 18); }
+  }
+}
+function demoPocketAt(th) { // pocket type at angle th (front = 0)
+  for (let i = 0; i < 24; i++) {
+    const a = ((demo.base + i * 15) % 360 + 540) % 360 - 180;
+    if (Math.abs(hueDist(a, th)) <= 7.5) return {type: PATTERN[i % 6], a};
+  }
+  return {type: 'OUT', a: 0};
+}
+function demoFire() {
+  if (source !== 'demo') return;
+  const land = demo.delay + (Math.random() - 0.5) * 60;
+  $('#res').textContent = '…';
+  setTimeout(() => {
+    const th0 = Math.asin(src().targetX * 2 - 1) / D2R, om = (360 / 24) / demo.spp;
+    let best = null;
+    for (let i = 0; i < 24; i++) if (PATTERN[i % 6] === 'UP') {
+      let a = ((demo.base + i * 15) % 360 + 540) % 360 - 180 - th0;
+      a = ((a + 180) % 360 + 360) % 360 - 180;
+      if (!best || Math.abs(a) < Math.abs(best)) best = a;
+    }
+    const ms = Math.round(-best / om * 1000), p = demoPocketAt(th0);
+    const up = p.type === 'UP';
+    $('#res').textContent = (up ? 'UP! ' : p.type + ' ') + (Math.abs(ms) < 15 ? 'ぴったり' : ms > 0 ? `早い ${ms}ms` : `遅い ${-ms}ms`);
+    $('#res').style.color = up ? 'var(--ok)' : 'var(--ng)';
+    if (up) counts.hit++; else if (ms > 0) counts.early++; else counts.late++;
+    showCounts();
+  }, land);
+}
+
+// ---------- pointer / setup modes ----------
+let drag = null;
+function hint(s) { $('#hint').textContent = s; }
+function setMode(m) {
+  mode = mode === m ? 'none' : m;
+  document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('sel', b.dataset.mode === mode));
+  hint({roi: '1段目リングの帯を指でなぞって囲んでください', color: '金色のUP看板をタップしてください', target: 'ボールが落ちる位置をタップしてください', none: ''}[mode]);
+}
+function cpos(e) { const b = view.getBoundingClientRect(); return {x: (e.clientX - b.left) * view.width / b.width, y: (e.clientY - b.top) * view.height / b.height}; }
+view.addEventListener('pointerdown', e => {
+  if (source === 'none') return;
+  const p = cpos(e);
+  if (mode === 'roi') { drag = {x0: p.x, y0: p.y, x1: p.x, y1: p.y}; view.setPointerCapture(e.pointerId); }
+  else if (mode === 'color') {
+    const d = vctx.getImageData(Math.max(0, p.x - 3), Math.max(0, p.y - 3), 7, 7).data;
+    let r = 0, g = 0, b = 0, n = d.length / 4;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
+    const [h, s, v] = hsv(r / n, g / n, b / n);
+    S.hue = Math.round(h); S.satMin = +Math.max(0.15, s * 0.6).toFixed(2); S.valMin = +Math.max(0.15, v * 0.55).toFixed(2);
+    save(); syncUI(); setMode('none');
+  } else if (mode === 'target') {
+    const r = roiPx();
+    if (r) { src().targetX = Math.min(0.98, Math.max(0.02, (p.x - r.x) / r.w)); save(); }
+    setMode('none');
+  }
+});
+view.addEventListener('pointermove', e => { if (drag) { const p = cpos(e); drag.x1 = p.x; drag.y1 = p.y; } });
+view.addEventListener('pointerup', () => {
+  if (!drag) return;
+  const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1), w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
+  drag = null;
+  if (w > 30 && h > 6) {
+    src().roi = {x: x / view.width, y: y / view.height, w: w / view.width, h: h / view.height};
+    T.unw = null; T.hist = []; save(); setMode('none');
+  }
+});
+
+// ---------- UI wiring ----------
+const counts = {hit: 0, early: 0, late: 0};
+function showCounts() {
+  const n = counts.hit + counts.early + counts.late;
+  $('#counts').textContent = `記録: UP ${counts.hit} / 早 ${counts.early} / 遅 ${counts.late}` + (n ? `（UP率 ${Math.round(counts.hit / n * 100)}%）` : '');
+}
+function setOffset(v) { S.offset = Math.max(0, Math.min(2500, Math.round(v))); save(); $('#off').value = S.offset; $('#offv').textContent = S.offset + 'ms'; }
+$('#early').onclick = () => { setOffset(S.offset - 20); if (source !== 'demo') { counts.early++; showCounts(); } };
+$('#late').onclick = () => { setOffset(S.offset + 20); if (source !== 'demo') { counts.late++; showCounts(); } };
+$('#hit').onclick = () => { counts.hit++; showCounts(); };
+$('#rstc').onclick = () => { counts.hit = counts.early = counts.late = 0; showCounts(); };
+$('#off').oninput = e => setOffset(+e.target.value);
+$('#bCam').onclick = startCamera;
+$('#bDemo').onclick = startDemo;
+$('#fileIn').onchange = e => { if (e.target.files[0]) startFile(e.target.files[0]); };
+$('#fire').onclick = demoFire;
+addEventListener('keydown', e => { if (e.code === 'Space' && source === 'demo') { e.preventDefault(); demoFire(); } });
+document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { if (source === 'none') return hint('先に映像を開始してください'); setMode(b.dataset.mode); });
+$('#reset').onclick = () => { S = structuredClone(DEF); save(); syncUI(); };
+document.querySelectorAll('[data-k]').forEach(el => {
+  el.addEventListener('input', () => {
+    S[el.dataset.k] = el.type === 'checkbox' ? el.checked : +el.value; save(); syncUI();
+  });
+});
+function syncUI() {
+  document.querySelectorAll('[data-k]').forEach(el => { if (el.type === 'checkbox') el.checked = !!S[el.dataset.k]; else el.value = S[el.dataset.k]; });
+  document.querySelectorAll('[data-o]').forEach(el => { el.textContent = S[el.dataset.o]; });
+  $('#swatch').style.background = `hsl(${S.hue},80%,50%)`;
+  setOffset(S.offset);
+}
+function fit() {
+  const aspect = view.width / view.height, maxH = innerHeight * 0.5;
+  const w = Math.min(document.documentElement.clientWidth, maxH * aspect);
+  view.style.width = w + 'px'; view.style.height = (w / aspect) + 'px';
+}
+addEventListener('resize', fit);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && source === 'camera') navigator.wakeLock?.request('screen').catch(() => {}); });
+
+// ---------- status bar / graph ----------
+function tierOf(v) { return v >= S.slowThr ? '超低速' : v >= 0.80 ? '低速' : v >= 0.70 ? '中速' : '高速'; }
+function prepCanvas(c) {
+  const dpr = devicePixelRatio || 1, w = Math.round(c.clientWidth * dpr), h = Math.round(c.clientHeight * dpr);
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  return [c.getContext('2d'), w, h, dpr];
+}
+let lastTxt = 0;
+function ui(now) {
+  const ok = speedOk();
+  if (now - lastTxt > 100) {
+    lastTxt = now;
+    const tier = $('#tier');
+    if (T.fitOk && isFinite(T.spp)) {
+      $('#sppv').textContent = T.spp.toFixed(2);
+      tier.textContent = tierOf(T.spp) + (ok ? '  打てる' : '');
+      tier.className = ok ? 'ok' : 'ng';
+    } else { $('#sppv').textContent = '--'; tier.textContent = source === 'none' ? '未計測' : '計測待ち'; tier.className = ''; }
+    const cd = $('#cd');
+    if (T.status) cd.textContent = T.status;
+    else if (T.next && (ok || !S.onlySlow)) cd.textContent = `次の発射まで ${((T.next.F - now) / 1000).toFixed(2)} 秒`;
+    else if (T.fitOk) cd.textContent = '回転が速いので待機中';
+    else cd.textContent = '';
+  }
+  // approach bar
+  const [c, w, h, dpr] = prepCanvas($('#bar'));
+  c.clearRect(0, 0, w, h);
+  const px = w * 0.8, span = 1600;
+  c.fillStyle = '#2a2a2a'; c.fillRect(0, h / 2 - 3 * dpr, w, 6 * dpr);
+  for (let i = 0; i < S.beeps; i++) {
+    const x = px - (S.beeps - 1 - i) * S.beepGap / span * px;
+    c.fillStyle = i === S.beeps - 1 ? '#fff' : '#666'; c.fillRect(x - 1 * dpr, 8 * dpr, (i === S.beeps - 1 ? 4 : 2) * dpr, h - 16 * dpr);
+  }
+  if (T.next && T.fitOk) {
+    const active = ok || !S.onlySlow;
+    for (let k = 0; k < 3; k++) {
+      const dtm = T.next.F + k * T.next.perMs - now, x = px - dtm / span * px;
+      if (x < -20 || x > w + 20) continue;
+      c.fillStyle = active ? '#f5c542' : '#555';
+      c.beginPath(); c.arc(x, h / 2, 12 * dpr, 0, Math.PI * 2); c.fill();
+    }
+  }
+  c.fillStyle = '#9a9a9a'; c.font = `${12 * dpr}px sans-serif`; c.fillText('押す', px + 8 * dpr, 16 * dpr);
+  // speed graph
+  const [g, gw, gh] = prepCanvas($('#graph'));
+  g.clearRect(0, 0, gw, gh);
+  const lo = 0.55, hi = 1.15, Y = v => gh - (Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo) * gh;
+  g.strokeStyle = '#3ddc84'; g.setLineDash([4 * dpr, 4 * dpr]); g.beginPath(); g.moveTo(0, Y(S.slowThr)); g.lineTo(gw, Y(S.slowThr)); g.stroke(); g.setLineDash([]);
+  g.strokeStyle = '#f5c542'; g.lineWidth = 2 * dpr; g.beginPath(); let first = true;
+  for (const p of T.sppHist) {
+    if (!isFinite(p.v)) continue;
+    const x = gw - (now - p.t) / 60000 * gw;
+    if (first) { g.moveTo(x, Y(p.v)); first = false; } else g.lineTo(x, Y(p.v));
+  }
+  g.stroke(); g.lineWidth = 1;
+  g.fillStyle = '#9a9a9a'; g.font = `${11 * dpr}px sans-serif`; g.fillText('速度（直近60秒・上ほど遅い）', 6 * dpr, 14 * dpr);
+  requestAnimationFrame(ui);
+}
+
+syncUI(); showCounts(); fit(); requestAnimationFrame(ui);
+window.__kzn = {T, S, demo}; // for debugging
+</script>
+</body>
+</html>

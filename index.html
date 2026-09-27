@@ -12,7 +12,13 @@
 html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif;-webkit-tap-highlight-color:transparent}
 body{min-height:100vh;overscroll-behavior:none;padding-bottom:40px}
 #stage{position:relative;background:#000;display:flex;justify-content:center}
-#view{display:block;touch-action:none;background:#000}
+#view{display:block;background:#000}
+#view.edit{touch-action:none;outline:3px solid var(--cy);outline-offset:-3px}
+@media (orientation:landscape) and (max-height:600px){
+  body{display:flex;padding-bottom:0}
+  #stage{flex:0 0 60%;height:100vh;position:sticky;top:0;align-items:center}
+  #panel{flex:1;height:100vh;overflow-y:auto;padding-bottom:40px}
+}
 #hint{position:absolute;left:8px;right:8px;top:8px;padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.7);font-size:14px;pointer-events:none}
 #hint:empty{display:none}
 #video{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
@@ -233,6 +239,11 @@ function process(t) {
   const om = (N * stu - st * su) / (N * stt - st * st), b0 = (su - om * st) / N;
   T.omega = om; T.fitT = t; T.fitU = b0 + om * (t - t0) / 1000; T.fitOk = true; T.status = '';
   T.spp = Math.abs(om) > 0.5 ? (360 / S.pockets) / Math.abs(om) : Infinity;
+  // residual check: noisy detections give a bad line fit
+  let res = 0;
+  for (const h of T.hist) { const e = h.u - (b0 + om * (h.t - t0) / 1000); res += e * e; }
+  res = Math.sqrt(res / N);
+  if (res > P * 0.06 || !(T.spp > 0.4 && T.spp < 2.5)) { T.fitOk = false; T.status = '速度が安定しません（範囲・色・ピントを確認）'; return; }
   T.sppHist.push({t: performance.now(), v: T.spp});
   while (T.sppHist.length && performance.now() - T.sppHist[0].t > 60000) T.sppHist.shift();
 }
@@ -356,6 +367,7 @@ function videoLoop() {
       let t = source === 'camera' ? meta.captureTime : meta.presentationTime;
       const pn = performance.now();
       if (!(t <= pn && t > pn - 500)) t = now;
+      if (Math.abs(video.videoWidth / video.videoHeight - view.width / view.height) > 0.02) { sizeTo(video.videoWidth, video.videoHeight); afterStart(); }
       vctx.drawImage(video, 0, 0, view.width, view.height);
       frame(t);
       video.requestVideoFrameCallback(cb);
@@ -383,6 +395,7 @@ async function startCamera() {
   await new Promise(r => video.videoWidth ? r() : video.addEventListener('loadedmetadata', r, {once: true}));
   sizeTo(video.videoWidth, video.videoHeight);
   const tr = stream.getVideoTracks()[0], cap = tr.getCapabilities ? tr.getCapabilities() : {};
+  if (cap.focusMode?.includes('continuous')) tr.applyConstraints({advanced: [{focusMode: 'continuous'}]}).catch(() => {});
   if (cap.zoom) {
     const z = $('#zoom'); z.min = cap.zoom.min; z.max = cap.zoom.max; z.step = cap.zoom.step || 0.1;
     z.value = tr.getSettings().zoom || cap.zoom.min; $('#zoomv').textContent = (+z.value).toFixed(1) + 'x';
@@ -401,7 +414,10 @@ async function startFile(f) {
   afterStart(); videoLoop();
 }
 function afterStart() {
-  if (!src().roi) setMode('roi'); else hint('');
+  const portrait = source === 'camera' && video.videoHeight > video.videoWidth;
+  hint(portrait ? 'スマホを横向きにして、1段目のリング全体が映るように離れて撮影してください'
+    : !src().roi ? '「① 範囲」を押して、1段目の帯を囲んでください' : '');
+  if (portrait) setTimeout(() => { if ($('#hint').textContent.startsWith('スマホを横向き')) hint(!src().roi ? '「① 範囲」を押して、1段目の帯を囲んでください' : ''); }, 6000);
 }
 
 // ---------- demo (synthetic machine for testing & practice) ----------
@@ -476,6 +492,7 @@ let drag = null;
 function hint(s) { $('#hint').textContent = s; }
 function setMode(m) {
   mode = mode === m ? 'none' : m;
+  view.classList.toggle('edit', mode !== 'none');
   document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('sel', b.dataset.mode === mode));
   hint({roi: '1段目リングの帯を指でなぞって囲んでください', color: '金色のUP看板をタップしてください', target: 'ボールが落ちる位置をタップしてください', none: ''}[mode]);
 }
@@ -502,10 +519,10 @@ view.addEventListener('pointerup', () => {
   if (!drag) return;
   const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1), w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
   drag = null;
-  if (w > 30 && h > 6) {
+  if (w > view.width * 0.2 && h > 6) {
     src().roi = {x: x / view.width, y: y / view.height, w: w / view.width, h: h / view.height};
-    T.unw = null; T.hist = []; save(); setMode('none');
-  }
+    T.unw = null; T.hist = []; T.sppHist = []; save(); setMode('none');
+  } else hint('範囲が小さすぎます。リングの左端から右端まで、横長になぞってください');
 });
 
 // ---------- UI wiring ----------
@@ -539,8 +556,9 @@ function syncUI() {
   setOffset(S.offset);
 }
 function fit() {
-  const aspect = view.width / view.height, maxH = innerHeight * 0.5;
-  const w = Math.min(document.documentElement.clientWidth, maxH * aspect);
+  const land = matchMedia('(orientation:landscape) and (max-height:600px)').matches;
+  const aspect = view.width / view.height, maxH = innerHeight * (land ? 1 : 0.5);
+  const w = Math.min($('#stage').clientWidth || document.documentElement.clientWidth, maxH * aspect);
   view.style.width = w + 'px'; view.style.height = (w / aspect) + 'px';
 }
 addEventListener('resize', fit);
@@ -594,11 +612,11 @@ function ui(now) {
   g.clearRect(0, 0, gw, gh);
   const lo = 0.55, hi = 1.15, Y = v => gh - (Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo) * gh;
   g.strokeStyle = '#3ddc84'; g.setLineDash([4 * dpr, 4 * dpr]); g.beginPath(); g.moveTo(0, Y(S.slowThr)); g.lineTo(gw, Y(S.slowThr)); g.stroke(); g.setLineDash([]);
-  g.strokeStyle = '#f5c542'; g.lineWidth = 2 * dpr; g.beginPath(); let first = true;
+  g.strokeStyle = '#f5c542'; g.lineWidth = 2 * dpr; g.beginPath(); let prevT = -1e9;
   for (const p of T.sppHist) {
-    if (!isFinite(p.v)) continue;
     const x = gw - (now - p.t) / 60000 * gw;
-    if (first) { g.moveTo(x, Y(p.v)); first = false; } else g.lineTo(x, Y(p.v));
+    if (p.t - prevT > 400) g.moveTo(x, Y(p.v)); else g.lineTo(x, Y(p.v));
+    prevT = p.t;
   }
   g.stroke(); g.lineWidth = 1;
   g.fillStyle = '#9a9a9a'; g.font = `${11 * dpr}px sans-serif`; g.fillText('速度（直近60秒・上ほど遅い）', 6 * dpr, 14 * dpr);

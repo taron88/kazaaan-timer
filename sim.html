@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>カザーン シミュレーター</title>
+<style>
+:root{--fg:#eee;--acc:#f5c542}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;background:#000;color:var(--fg);font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif;overflow:hidden}
+#c{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
+#ctl{position:fixed;right:10px;top:10px;width:250px;padding:10px;border-radius:10px;background:rgba(20,20,20,.88);font-size:13px;display:flex;flex-direction:column;gap:8px}
+#ctl button{appearance:none;border:1px solid #555;background:#2a2a2a;color:var(--fg);font-size:14px;padding:8px;border-radius:8px;cursor:pointer}
+#ctl button.big{font-size:18px;font-weight:700;background:#5a3b00;border-color:var(--acc)}
+#ctl select,#ctl input[type=range]{width:100%}
+#ctl label{display:flex;justify-content:space-between;gap:6px;align-items:center}
+#ctl .row{display:flex;gap:6px}
+#ctl .row button{flex:1}
+#ctl .help{color:#999;line-height:1.5;font-size:12px}
+#show{position:fixed;right:10px;top:10px;appearance:none;border:1px solid #555;background:rgba(20,20,20,.8);color:#ccc;border-radius:8px;padding:6px 10px;font-size:13px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="show" hidden>操作パネル</button>
+<div id="ctl">
+  <button id="fire" class="big">発射（スペース）</button>
+  <label>回転速度
+    <select id="mode">
+      <option value="auto">自動で切替</option>
+      <option value="0">超低速 1.00秒/穴</option>
+      <option value="1">低速 0.86秒/穴</option>
+      <option value="2">中速 0.75秒/穴</option>
+      <option value="3">高速 0.66秒/穴</option>
+    </select>
+  </label>
+  <label>発射→落下 <span id="dlv"></span></label>
+  <input type="range" id="delay" min="300" max="1500" step="10">
+  <label>発射のばらつき ±<span id="jtv"></span></label>
+  <input type="range" id="jit" min="0" max="80" step="5">
+  <label><span>回転方向</span><select id="dir"><option value="1">左→右</option><option value="-1">右→左</option></select></label>
+  <label><span><input type="checkbox" id="led"> LED点滅（誤検出テスト）</span></label>
+  <label><span><input type="checkbox" id="hud" checked> 正解表示（速度・結果）</span></label>
+  <div class="row"><button id="fs">全画面</button><button id="hide">パネルを隠す</button></div>
+  <button id="rst">記録リセット</button>
+  <div class="help">スマホのアプリで「カメラ開始」→ この画面を撮影。アプリの①範囲はUP看板の帯、③落下位置は水色の▼に合わせてください。ボタンはスペースキー／画面クリックでも押せます。</div>
+</div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const cv = $('#c'), c = cv.getContext('2d');
+const D2R = Math.PI / 180, VW = 1600, VH = 900;
+const PATTERN = ['OUT', 'OUT', 'UP', 'OUT', 'DIA', 'UP'];
+const TIERS = [1.00, 0.86, 0.75, 0.66], TNAME = ['超低速', '低速', '中速', '高速'];
+const cfg = {mode: 'auto', delay: 700, jit: 30, dir: 1, led: false, hud: true};
+try { Object.assign(cfg, JSON.parse(localStorage.getItem('kzn-sim') || '{}')); } catch (e) {}
+const save = () => { try { localStorage.setItem('kzn-sim', JSON.stringify(cfg)); } catch (e) {} };
+
+const st = {base: 0, spp: 1.0, tier: 0, nextChange: 0, lastT: 0, balls: [], result: null, stats: {up: 0, n: 0}};
+// geometry (virtual 1600x900)
+const G = {cx: 800, R: 560, y: 520, curve: 46};
+
+// ---------- static background (pre-rendered) ----------
+const bg = document.createElement('canvas'); bg.width = VW; bg.height = VH;
+(function drawBg() {
+  const b = bg.getContext('2d');
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const g = b.createLinearGradient(0, 0, 0, VH); g.addColorStop(0, '#0d0b10'); g.addColorStop(1, '#1d1418');
+  b.fillStyle = g; b.fillRect(0, 0, VW, VH);
+  // background arcade blur
+  for (let i = 0; i < 60; i++) { b.fillStyle = `hsla(${rnd() * 360},60%,${20 + rnd() * 25}%,.35)`; b.fillRect(rnd() * VW, rnd() * 380, 20 + rnd() * 90, 10 + rnd() * 60); }
+  // volcano body (upper tiers)
+  const tier = (y, rx, ry, h) => {
+    const gg = b.createLinearGradient(0, y - h, 0, y); gg.addColorStop(0, '#5a1a10'); gg.addColorStop(1, '#2a0d08');
+    b.fillStyle = gg; b.fillRect(G.cx - rx, y - h, rx * 2, h);
+    b.beginPath(); b.ellipse(G.cx, y, rx, ry, 0, 0, Math.PI); b.fill();
+    b.fillStyle = '#7a2a18'; b.beginPath(); b.ellipse(G.cx, y - h, rx, ry, 0, 0, Math.PI * 2); b.fill();
+    b.strokeStyle = 'rgba(255,120,40,.55)'; b.lineWidth = 3;
+    for (let i = 0; i < 26; i++) { const x = G.cx - rx + rnd() * rx * 2, yy = y - h + rnd() * h; b.beginPath(); b.moveTo(x, yy); b.lineTo(x + (rnd() - .5) * 60, yy + rnd() * 30); b.lineTo(x + (rnd() - .5) * 80, yy + rnd() * 40); b.stroke(); }
+  };
+  tier(220, 250, 40, 90);   // 3rd
+  tier(380, 430, 60, 130);  // 2nd
+  // gold decorations on 2nd tier (distractor above the ring band)
+  b.fillStyle = '#d4ad3a'; b.fillRect(900, 300, 50, 36); b.fillRect(960, 296, 18, 44);
+  b.fillStyle = '#6a1712'; b.fillRect(700, 300, 80, 30);
+  // flames (yellow/orange distractors)
+  const flame = (x, y, s, col) => { b.fillStyle = col; b.beginPath(); b.moveTo(x, y); b.quadraticCurveTo(x - 40 * s, y - 60 * s, x - 10 * s, y - 140 * s); b.quadraticCurveTo(x + 5 * s, y - 80 * s, x + 20 * s, y - 120 * s); b.quadraticCurveTo(x + 50 * s, y - 60 * s, x, y); b.fill(); };
+  flame(560, 230, 1.1, '#e0561c'); flame(1040, 230, 1.1, '#e0561c'); flame(330, 380, 1, '#e8661c'); flame(1270, 380, 1, '#e8661c');
+  flame(250, 470, .9, '#e8b02a'); flame(1350, 470, .9, '#e8b02a');
+  // ring back wall (behind pockets)
+  const wg = b.createLinearGradient(0, G.y - 60, 0, G.y + 150); wg.addColorStop(0, '#4a1a10'); wg.addColorStop(1, '#2a0c06');
+  b.fillStyle = wg; b.fillRect(G.cx - G.R, G.y - 70, G.R * 2, 190);
+})();
+
+// ---------- pockets ----------
+function wrap180(a) { return ((a + 180) % 360 + 360) % 360 - 180; }
+function pocketAngle(i) { return wrap180(st.base + i * 15); }
+function xAt(th) { return G.cx + G.R * Math.sin(Math.max(-90, Math.min(90, th)) * D2R); }
+function yAt(th) { return G.y + G.curve * Math.cos(th * D2R); }
+
+function drawPockets(now) {
+  const list = [];
+  for (let i = 0; i < 24; i++) { const th = pocketAngle(i); if (Math.cos(th * D2R) > 0.03) list.push({i, th}); }
+  list.sort((a, b) => Math.cos(a.th * D2R) - Math.cos(b.th * D2R));
+  for (const {i, th} of list) {
+    const xa = xAt(th - 7.3), xb = xAt(th + 7.3), w = xb - xa, y = yAt(th), sh = 0.55 + 0.45 * Math.cos(th * D2R);
+    const type = PATTERN[i % 6];
+    // stone pocket
+    c.fillStyle = `rgb(${95 * sh | 0},${92 * sh | 0},${84 * sh | 0})`; c.fillRect(xa, y + 30, w, 56);
+    c.fillStyle = `rgb(${60 * sh | 0},${58 * sh | 0},${52 * sh | 0})`;
+    for (let k = 0; k < 3; k++) c.fillRect(xa + 2, y + 38 + k * 16, w - 4, 3);
+    c.fillStyle = '#0c0806'; c.beginPath(); c.ellipse(xa + w / 2, y + 34, w * 0.38, 7, 0, 0, Math.PI * 2); c.fill();
+    // sign
+    if (type === 'UP') {
+      const gg = c.createLinearGradient(0, y - 6, 0, y + 30);
+      gg.addColorStop(0, `rgb(${232 * sh | 0},${196 * sh | 0},${58 * sh | 0})`); gg.addColorStop(1, `rgb(${170 * sh | 0},${132 * sh | 0},${22 * sh | 0})`);
+      c.fillStyle = gg; c.fillRect(xa + w * .12, y - 6, w * .76, 34);
+      c.fillRect(xa, y - 40, w * .14, 70); c.fillRect(xb - w * .14, y - 40, w * .14, 70); // gold pillars
+      if (w > 22) { c.fillStyle = '#3a2800'; c.font = `bold ${Math.min(24, w * .38) | 0}px sans-serif`; c.textAlign = 'center'; c.fillText('UP', xa + w / 2, y + 20); }
+    } else if (type === 'DIA') {
+      c.fillStyle = `rgb(${90 * sh | 0},${40 * sh | 0},${130 * sh | 0})`; c.fillRect(xa + w * .1, y - 4, w * .8, 30);
+      if (w > 22) { c.fillStyle = '#e8d8ff'; c.font = `bold ${Math.min(20, w * .35) | 0}px sans-serif`; c.textAlign = 'center'; c.fillText('◆', xa + w / 2, y + 18); }
+    } else {
+      c.fillStyle = `rgb(${120 * sh | 0},${30 * sh | 0},${22 * sh | 0})`; c.fillRect(xa + w * .1, y - 4, w * .8, 30);
+      c.strokeStyle = `rgb(${200 * sh | 0},${60 * sh | 0},${40 * sh | 0})`; c.lineWidth = 2; c.strokeRect(xa + w * .1, y - 4, w * .8, 30);
+      if (w > 26) { c.fillStyle = '#f2e6e0'; c.font = `bold ${Math.min(18, w * .28) | 0}px sans-serif`; c.textAlign = 'center'; c.fillText('OUT', xa + w / 2, y + 17); }
+    }
+  }
+}
+
+function drawForeground(now) {
+  // golden base tray under the ring (distractor just below the band)
+  const tg = c.createLinearGradient(0, G.y + G.curve + 100, 0, G.y + G.curve + 150);
+  tg.addColorStop(0, '#b8862a'); tg.addColorStop(1, '#6a4a10');
+  c.fillStyle = tg; c.beginPath();
+  c.ellipse(G.cx, G.y + 110, G.R + 60, G.curve + 60, 0, 0, Math.PI); c.lineTo(G.cx - G.R - 60, G.y + 110); c.fill();
+  // rail
+  c.strokeStyle = '#c07a30'; c.lineWidth = 8; c.beginPath();
+  c.ellipse(G.cx, G.y + 100, G.R + 20, G.curve + 40, 0, 0.1, Math.PI * .55); c.stroke();
+  // neon tubes
+  const a = cfg.led ? 0.55 + 0.45 * Math.sin(now / 90) : 1;
+  c.fillStyle = `rgba(255,214,60,${a})`; c.fillRect(70, 0, 22, VH); c.fillRect(1508, 0, 22, VH);
+  c.fillStyle = `rgba(255,240,180,${a * .6})`; c.fillRect(76, 0, 10, VH); c.fillRect(1514, 0, 10, VH);
+  if (cfg.led) { // blinking gold LEDs near the ring (hard case)
+    const on = Math.floor(now / 250) % 2;
+    c.fillStyle = on ? '#ffd23a' : '#4a3a10';
+    for (let k = 0; k < 8; k++) { c.beginPath(); c.arc(G.cx - 420 + k * 120, G.y + 195, 6, 0, Math.PI * 2); c.fill(); }
+  }
+  // drop point marker
+  c.fillStyle = '#39d0ff'; c.beginPath(); c.moveTo(G.cx - 12, G.y - 78); c.lineTo(G.cx + 12, G.y - 78); c.lineTo(G.cx, G.y - 60); c.fill();
+}
+
+// ---------- ball ----------
+function fire() {
+  const now = performance.now();
+  const land = cfg.delay + (Math.random() * 2 - 1) * cfg.jit;
+  st.balls.push({t0: now, land: now + land, pocket: null, done: false});
+}
+function drawBalls(now) {
+  const sx = G.cx + G.R * 0.95, sy = G.y + 170, ex = G.cx, ey = G.y - 20;
+  for (const b of st.balls) {
+    let x, y;
+    if (now < b.land) {
+      const p = (now - b.t0) / (b.land - b.t0);
+      if (p < 0.8) { const q = p / 0.8; x = sx + (ex - sx) * q; y = sy + (ey - 40 - sy) * q - Math.sin(q * Math.PI) * 60; }
+      else { const q = (p - 0.8) / 0.2; x = ex; y = ey - 40 + 60 * q * q; }
+    } else {
+      if (!b.done) judge(b);
+      const th = pocketAngle(b.pocket);
+      if (now - b.land > 1500 || Math.cos(th * D2R) < 0.1) { b.gone = true; continue; }
+      x = xAt(th); y = yAt(th) + 30;
+    }
+    const rg = c.createRadialGradient(x - 4, y - 4, 2, x, y, 13);
+    rg.addColorStop(0, '#fff'); rg.addColorStop(1, '#9aa');
+    c.fillStyle = rg; c.beginPath(); c.arc(x, y, 13, 0, Math.PI * 2); c.fill();
+  }
+  st.balls = st.balls.filter(b => !b.gone);
+}
+function judge(b) {
+  b.done = true;
+  let best = null, pk = 0, bestAbs = 999;
+  for (let i = 0; i < 24; i++) {
+    const a = pocketAngle(i);
+    if (Math.abs(a) < bestAbs) { bestAbs = Math.abs(a); pk = i; }
+    if (PATTERN[i % 6] === 'UP' && (best === null || Math.abs(a) < Math.abs(best))) best = a;
+  }
+  b.pocket = pk;
+  const om = 15 / st.spp, ms = Math.round(-best * cfg.dir / om * 1000), type = PATTERN[pk % 6];
+  st.stats.n++; if (type === 'UP') st.stats.up++;
+  st.result = {type, ms, t: performance.now()};
+}
+
+// ---------- HUD ----------
+function drawHud(now) {
+  if (!cfg.hud) return;
+  c.textAlign = 'left'; c.font = 'bold 26px sans-serif';
+  c.fillStyle = 'rgba(0,0,0,.6)'; c.fillRect(110, 790, 520, 96);
+  c.fillStyle = '#fff';
+  c.fillText(`正解: ${st.spp.toFixed(2)} 秒/穴  ${TNAME[st.tier]}`, 124, 828);
+  c.font = '22px sans-serif'; c.fillStyle = '#bbb';
+  const s = st.stats;
+  c.fillText(`発射 ${s.n}  UP ${s.up}` + (s.n ? `（${Math.round(s.up / s.n * 100)}%）` : ''), 124, 866);
+  if (st.result && now - st.result.t < 2500) {
+    const r = st.result, up = r.type === 'UP';
+    c.textAlign = 'center'; c.font = 'bold 64px sans-serif';
+    c.fillStyle = up ? '#3ddc84' : '#ff5a4f';
+    c.fillText(up ? 'UP!' : r.type === 'DIA' ? 'ダイヤ' : 'OUT', G.cx, 90);
+    c.font = 'bold 30px sans-serif'; c.fillStyle = '#fff';
+    c.fillText(Math.abs(r.ms) < 15 ? 'ぴったり' : r.ms > 0 ? `早い ${r.ms}ms` : `遅い ${-r.ms}ms`, G.cx, 132);
+  }
+}
+
+// ---------- loop ----------
+function step(now) {
+  const dt = st.lastT ? Math.min(0.1, (now - st.lastT) / 1000) : 0; st.lastT = now;
+  if (cfg.mode === 'auto') {
+    if (now > st.nextChange) { st.tier = Math.floor(Math.random() * 4); st.nextChange = now + 10000 + Math.random() * 15000; }
+  } else st.tier = +cfg.mode;
+  st.spp += (TIERS[st.tier] - st.spp) * Math.min(1, dt * 2);
+  st.base = (st.base + cfg.dir * (15 / st.spp) * dt + 360) % 360;
+}
+function frame(now) {
+  step(now);
+  const dpr = devicePixelRatio || 1, W = Math.round(innerWidth * dpr), H = Math.round(innerHeight * dpr);
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
+  const sc = Math.min(W / VW, H / VH);
+  c.setTransform(sc, 0, 0, sc, (W - VW * sc) / 2, (H - VH * sc) / 2);
+  c.drawImage(bg, 0, 0);
+  drawPockets(now);
+  drawForeground(now);
+  drawBalls(now);
+  drawHud(now);
+  requestAnimationFrame(frame);
+}
+
+// ---------- controls ----------
+function sync() {
+  $('#mode').value = cfg.mode; $('#delay').value = cfg.delay; $('#dlv').textContent = cfg.delay + 'ms';
+  $('#jit').value = cfg.jit; $('#jtv').textContent = cfg.jit + 'ms'; $('#dir').value = cfg.dir;
+  $('#led').checked = cfg.led; $('#hud').checked = cfg.hud;
+}
+$('#fire').onclick = e => { e.stopPropagation(); fire(); };
+$('#mode').onchange = e => { cfg.mode = e.target.value; st.nextChange = 0; save(); };
+$('#delay').oninput = e => { cfg.delay = +e.target.value; save(); sync(); };
+$('#jit').oninput = e => { cfg.jit = +e.target.value; save(); sync(); };
+$('#dir').onchange = e => { cfg.dir = +e.target.value; save(); };
+$('#led').onchange = e => { cfg.led = e.target.checked; save(); };
+$('#hud').onchange = e => { cfg.hud = e.target.checked; save(); };
+$('#rst').onclick = () => { st.stats = {up: 0, n: 0}; st.result = null; };
+$('#fs').onclick = () => { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}); };
+$('#hide').onclick = () => { $('#ctl').hidden = true; $('#show').hidden = false; };
+$('#show').onclick = () => { $('#ctl').hidden = false; $('#show').hidden = true; };
+cv.addEventListener('pointerdown', fire);
+addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); fire(); }
+  else if (e.key === 'h' || e.key === 'H') $('#hide').click();
+});
+sync(); requestAnimationFrame(frame);
+window.__sim = {st, cfg};
+</script>
+</body>
+</html>

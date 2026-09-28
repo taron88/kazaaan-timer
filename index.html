@@ -102,11 +102,13 @@ input[type=range]{width:100%;accent-color:var(--acc)}
     </div>
     <div class="set"><label>計測方式</label><span></span>
       <select data-k="method" style="grid-column:1/3;font-size:16px;padding:8px;background:#2a2a2a;color:var(--fg);border:1px solid #444;border-radius:8px">
-        <option value="gate">通過タイミング（検知位置をUPが通る間隔）</option>
+        <option value="line">中央ライン（縦線をUPが通る間隔）※おすすめ</option>
+        <option value="gate">通過タイミング（範囲内の検知位置）</option>
         <option value="band">帯全体で追跡（見えている全UPの動き）</option>
       </select>
     </div>
-    <p class="help">① 1段目リングを左端から右端まで指でなぞって囲む。リングは横にしか動かないので、縦はUP看板と柱が確実に入るよう広めでOK（土台や飾りなど動かない金色は自動で無視します）<br>② 金色のUP看板をタップして色を覚えさせる<br>③ ボールがリングに落ちる位置をタップ（水色の線）<br>④ 通過タイミング方式で、UPの通過を検知する位置をタップ（オレンジの線）。落下位置と同じ場所が基本ですが、見えにくい時は手前にずらせます</p>
+    <p class="help" id="helpLine"><b>中央ライン方式</b>：スマホを縦に固定し、オレンジの縦線がボールの落ちる位置に重なるように置きます。あとは「② UP色」で金色のUP看板をタップするだけです。線の位置は「④ 検知位置」でタップして動かせます。①③は不要です（① 範囲を設定した場合は、その上下の範囲だけを見ます）。</p>
+    <p class="help" id="helpBand">① 1段目リングを左端から右端まで指でなぞって囲む。リングは横にしか動かないので、縦はUP看板と柱が確実に入るよう広めでOK（土台や飾りなど動かない金色は自動で無視します）<br>② 金色のUP看板をタップして色を覚えさせる<br>③ ボールがリングに落ちる位置をタップ（水色の線）<br>④ 通過タイミング方式で、UPの通過を検知する位置をタップ（オレンジの線）。落下位置と同じ場所が基本ですが、見えにくい時は手前にずらせます</p>
   </section>
 
   <section>
@@ -155,13 +157,13 @@ const D2R = Math.PI / 180;
 // ---------- settings ----------
 const DEF = {src: {}, hue: 48, hueTol: 14, satMin: 0.40, valMin: 0.45, offset: 600, slowThr: 0.93,
   pockets: 24, ups: 8, sound: true, vib: true, flash: true, onlySlow: true, beeps: 3, beepGap: 350,
-  showMask: true, win: 700, method: 'gate'};
+  showMask: true, win: 700, method: 'line', lineW: 0.3};
 let S = structuredClone(DEF);
 try { Object.assign(S, JSON.parse(localStorage.getItem('kzn-settings') || '{}')); } catch (e) {}
 function save() { try { localStorage.setItem('kzn-settings', JSON.stringify(S)); } catch (e) {} }
 
 let source = 'none', gen = 0, stream = null, actx = null, mode = 'none';
-const src = () => { const s = (S.src[source] ||= {roi: null, targetX: 0.5}); if (s.gateX == null) s.gateX = s.targetX; return s; };
+const src = () => { const s = (S.src[source] ||= {roi: null, targetX: 0.5}); if (s.gateX == null) s.gateX = s.targetX; if (s.lineX == null) s.lineX = 0.5; return s; };
 
 // ---------- tracking state ----------
 const T = {blobs: [], hist: [], unw: null, lastPsi: 0, lastT: 0, fitOk: false, omega: 0, fitT: 0, fitU: 0,
@@ -184,30 +186,151 @@ function roiPx() {
 }
 
 function lost(t, why) {
-  if (S.method === 'gate') { GT.prev = null; if (!T.fitOk) T.status = why; return; }
+  if (S.method !== 'band') { GT.prev = null; if (!T.fitOk) T.status = why; return; }
   T.fitOk = false; T.status = why; if (t - T.lastT > 500) { T.unw = null; T.hist = []; } }
 
-function process(t) {
-  T.blobs = []; T.mask = null;
-  const r = roiPx();
-  if (!r) { T.fitOk = false; T.status = '範囲が未設定です（① 範囲）'; return; }
-  const PW = 240, PH = Math.max(6, Math.min(120, Math.round(PW * r.h / r.w)));
+function goldMask(x0, y0, w, h, PW, PH) {
   if (proc.width !== PW) proc.width = PW;
   if (proc.height !== PH) proc.height = PH;
-  pctx.drawImage(view, r.x, r.y, r.w, r.h, 0, 0, PW, PH);
+  pctx.drawImage(view, x0, y0, w, h, 0, 0, PW, PH);
   const d = pctx.getImageData(0, 0, PW, PH).data;
   const col = new Float32Array(PW), mask = new Uint8Array(PW * PH);
   for (let y = 0; y < PH; y++) for (let x = 0; x < PW; x++) {
     const i = (y * PW + x) * 4, [h, s, v] = hsv(d[i], d[i + 1], d[i + 2]);
     if (s >= S.satMin && v >= S.valMin && hueDist(h, S.hue) <= S.hueTol) { col[x]++; mask[y * PW + x] = 1; }
   }
-  T.mask = mask; T.mw = PW; T.mh = PH;
-
-  // remove static gold (base tray, decorations): per-column baseline that follows the minimum over time.
-  // The ring only moves sideways, so anything gold that never moves out of a column is not an UP.
+  T.mask = mask; T.mw = PW; T.mh = PH; T.maskRect = {x: x0, y: y0, w, h};
+  // remove static gold: per-column baseline that follows the minimum over time.
+  // The ring only moves sideways, so gold that never leaves a column is not an UP.
+  // Baseline = minimum over the last ~6 s (12 buckets of 0.5 s); an UP never stays in one column that long.
   for (let x = 0; x < PW; x++) col[x] /= PH;
-  if (!T.base || T.base.length !== PW) T.base = Float32Array.from(col);
-  for (let x = 0; x < PW; x++) { T.base[x] = Math.min(col[x], T.base[x] + 0.0005); col[x] = Math.max(0, col[x] - T.base[x]); }
+  const now = performance.now();
+  if (!T.base || T.base.w !== PW) T.base = {w: PW, b: [Float32Array.from(col)], t: now};
+  const B = T.base;
+  if (now - B.t > 500) { B.b.push(Float32Array.from(col)); if (B.b.length > 12) B.b.shift(); B.t = now; }
+  const cur = B.b[B.b.length - 1];
+  for (let x = 0; x < PW; x++) {
+    if (col[x] < cur[x]) cur[x] = col[x];
+    let mn = cur[x]; for (const a of B.b) if (a[x] < mn) mn = a[x];
+    col[x] = Math.max(0, col[x] - mn);
+  }
+  return col;
+}
+
+// Line mode mask: per-pixel static removal + automatic choice of the rows the UPs travel along.
+// Over time an UP row has moving gold across many columns; a blinking lamp only at a few.
+function lineMask(y0, h, PW, PH) {
+  const W = view.width;
+  if (proc.width !== PW) proc.width = PW;
+  if (proc.height !== PH) proc.height = PH;
+  pctx.drawImage(view, 0, y0, W, h, 0, 0, PW, PH);
+  const d = pctx.getImageData(0, 0, PW, PH).data, N = PW * PH;
+  const mask = new Uint8Array(N), H0 = S.hue, HT = S.hueTol, SM = S.satMin, VM = S.valMin * 255;
+  for (let i = 0, p = 0; i < N; i++, p += 4) {
+    const r = d[p], g = d[p + 1], b = d[p + 2];
+    const mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b), c = mx - mn;
+    if (mx < VM || !c || c < SM * mx) continue;
+    let hh = mx === r ? ((g - b) / c) % 6 : mx === g ? (b - r) / c + 2 : (r - g) / c + 4;
+    hh *= 60; if (hh < 0) hh += 360;
+    let dh = Math.abs(hh - H0); if (dh > 180) dh = 360 - dh;
+    if (dh <= HT) mask[i] = 1;
+  }
+  T.mask = mask; T.mw = PW; T.mh = PH; T.maskRect = {x: 0, y: y0, w: W, h};
+  const now = performance.now();
+  let L = T.lm;
+  if (!L || L.n !== N) L = T.lm = {n: N, b: [], cur: Uint8Array.from(mask), stat: new Uint8Array(N), t: now, cov: new Float32Array(PH)};
+  if (now - L.t > 500) {
+    // close the 0.5 s bucket ("gold in every frame of it"); static = gold in every bucket of the last ~6 s
+    L.b.push(L.cur); if (L.b.length > 12) L.b.shift();
+    L.stat = Uint8Array.from(L.b[0]);
+    for (let k = 1; k < L.b.length; k++) { const a = L.b[k], s = L.stat; for (let i = 0; i < N; i++) s[i] &= a[i]; }
+    L.cur = Uint8Array.from(mask); L.t = now;
+  }
+  const cur = L.cur, stat = L.stat;
+  const mov = new Uint8Array(N), rowN = new Float32Array(PH);
+  for (let i = 0; i < N; i++) {
+    cur[i] &= mask[i];
+    if (mask[i] && !stat[i]) { mov[i] = 1; rowN[(i / PW) | 0]++; }
+  }
+  let cmax = 0;
+  for (let y = 0; y < PH; y++) { L.cov[y] += (rowN[y] / PW - L.cov[y]) * 0.01; if (L.cov[y] > cmax) cmax = L.cov[y]; }
+  const col = new Float32Array(PW); let nr = 0;
+  const shown = new Uint8Array(N); // display only what is actually counted
+  if (cmax > 0) for (let y = 0; y < PH; y++) if (L.cov[y] >= cmax * 0.4) {
+    nr++;
+    for (let x = 0; x < PW; x++) { const i = y * PW + x; col[x] += mov[i]; shown[i] = mov[i]; }
+  }
+  if (nr) for (let x = 0; x < PW; x++) col[x] /= nr;
+  T.mask = shown;
+  T.lineRows = nr;
+  return col;
+}
+
+// ---------- line method: UP crossing a vertical line (phone fixed in portrait) ----------
+function lineProcess(t) {
+  const W = view.width, H = view.height, s = src();
+  const y0 = s.roi ? s.roi.y * H : 0, h = s.roi ? s.roi.h * H : H;
+  const PW = 360, PH = Math.max(8, Math.min(160, Math.round(PW * h / W)));
+  const col = lineMask(y0, h, PW, PH);
+  // find moving-gold blobs across the whole width (the UP may be small, so threshold on the strongest column)
+  const sm = new Float32Array(PW); let top = 0;
+  for (let x = 0; x < PW; x++) {
+    let a = 0, n = 0;
+    for (let k = -1; k <= 1; k++) { const j = x + k; if (j >= 0 && j < PW) { a += col[j]; n++; } }
+    sm[x] = a / n; if (sm[x] > top) top = sm[x];
+  }
+  const blobs = [];
+  if (top >= 0.05) {
+    // Absolute threshold (a tall bright object elsewhere, e.g. a neon tube, must not hide a small UP),
+    // then each blob is weighted against its own peak so faint fringes don't bias the centre.
+    // Gap closing scales with the on-screen spacing between UPs (learned below), so sign + pillars merge.
+    const thr = 0.05, on = new Uint8Array(PW), GAP = Math.round(PW * (T.upSp || 0.25) * 0.4);
+    for (let x = 0; x < PW; x++) on[x] = sm[x] > thr;
+    for (let x = 0, last = -1; x < PW; x++) if (on[x]) { if (last >= 0 && x - last > 1 && x - last <= GAP + 1) for (let j = last + 1; j < x; j++) on[j] = 1; last = x; }
+    for (let x = 0; x < PW;) {
+      if (!on[x]) { x++; continue; }
+      const xs = x; let pk = 0;
+      while (x < PW && on[x]) { if (sm[x] > pk) pk = sm[x]; x++; }
+      let a = 0, ax = 0;
+      for (let j = xs; j < x; j++) { const w = sm[j] - pk * 0.3; if (w > 0) { a += w; ax += w * j; } }
+      if (x - xs >= 2 && a > 0) blobs.push((ax / a + 0.5) / PW);
+    }
+  }
+  T.lineBlobs = blobs;
+  // learn the on-screen spacing between neighbouring UPs near the line
+  for (let i = 1; i < blobs.length; i++) {
+    const d = blobs[i] - blobs[i - 1], mid = (blobs[i] + blobs[i - 1]) / 2;
+    if (Math.abs(mid - s.lineX) < 0.25 && d > 0.08 && d < 0.6) T.upSp = T.upSp ? T.upSp + (d - T.upSp) * 0.02 : d;
+  }
+  const sp = T.upSp || 0.25;
+  // track every blob frame to frame; a crossing is a tracked blob that travelled across the line.
+  // Blinking lights that stay in place never travel, so they are never counted.
+  const prev = (GT.tracks && t - GT.tracksT < 300) ? GT.tracks : [];
+  const tracks = [];
+  for (const b of blobs) {
+    const u = b - s.lineX;
+    let m = null;
+    for (const q of prev) if (Math.abs(q.u - u) < sp * 0.25 && (!m || Math.abs(q.u - u) < Math.abs(m.u - u))) m = q;
+    const tr = {u, origin: m ? m.origin : u, age: m ? m.age + 1 : 0};
+    if (m && m.u !== 0 && Math.sign(u) !== Math.sign(m.u) && Math.sign(m.origin) === Math.sign(m.u) && Math.abs(m.origin) > sp * 0.3 && m.age >= 5) {
+      const f = m.u / (m.u - u), tc = GT.tracksT + f * (t - GT.tracksT);
+      onCross(tc, u > 0 ? 1 : -1, 0);
+      tr.origin = u;
+    }
+    tracks.push(tr);
+  }
+  GT.tracks = tracks; GT.tracksT = t;
+  if (GT.last && T.fitOk && t - GT.last > 2.5 * (T.gateIv || 3000)) T.fitOk = false;
+  T.status = T.fitOk ? '' : GT.last ? 'UPの通過を待っています…' : 'UPがオレンジの線を通るのを待っています…';
+}
+
+function process(t) {
+  T.blobs = []; T.mask = null;
+  if (S.method === 'line') return lineProcess(t);
+  const r = roiPx();
+  if (!r) { T.fitOk = false; T.status = '範囲が未設定です（① 範囲）'; return; }
+  const PW = 240, PH = Math.max(6, Math.min(120, Math.round(PW * r.h / r.w)));
+  const col = goldMask(r.x, r.y, r.w, r.h, PW, PH);
   // smooth column profile, find gold blobs
   const sm = new Float32Array(PW); let mx = 0;
   for (let x = 0; x < PW; x++) {
@@ -278,7 +401,7 @@ function process(t) {
 
 // ---------- gate method: time between UP crossings at one point ----------
 const GT = {prev: null, last: null, flash: 0};
-function resetTracking() { T.base = null; T.unw = null; T.hist = []; T.sppHist = []; T.fitOk = false; T.spp = null; GT.prev = null; GT.last = null; }
+function resetTracking() { T.base = null; T.lm = null; T.unw = null; T.hist = []; T.sppHist = []; T.fitOk = false; T.spp = null; GT.prev = null; GT.last = null; GT.tracks = null; }
 function gateProcess(t) {
   const gu = src().gateX * 2 - 1, gth = Math.asin(gu) / D2R;
   // merge blobs belonging to the same UP (sign + pillars)
@@ -322,7 +445,7 @@ function onCross(tc, dir, gth) {
 }
 
 // ---------- prediction & cues ----------
-const targetTh = () => Math.asin(src().targetX * 2 - 1) / D2R;
+const targetTh = () => S.method === 'line' ? 0 : Math.asin(src().targetX * 2 - 1) / D2R;
 function nextFire(now) {
   if (!T.fitOk || !isFinite(T.spp)) return null;
   const P = 360 / S.ups, om = T.omega, aom = Math.abs(om), sg = Math.sign(om);
@@ -386,14 +509,21 @@ function ensureAudio() {
 
 // ---------- overlay ----------
 function drawOverlay() {
-  const r = roiPx();
-  if (r && T.mask && S.showMask) {
-    const sx = r.w / T.mw, sy = r.h / T.mh;
+  const r = roiPx(), mr = T.maskRect;
+  if (mr && T.mask && S.showMask) {
+    const sx = mr.w / T.mw, sy = mr.h / T.mh;
     vctx.fillStyle = 'rgba(255,0,255,.45)';
     for (let y = 0; y < T.mh; y++) for (let x = 0; x < T.mw; x++)
-      if (T.mask[y * T.mw + x]) vctx.fillRect(r.x + x * sx, r.y + y * sy, sx + .5, sy + .5);
+      if (T.mask[y * T.mw + x]) vctx.fillRect(mr.x + x * sx, mr.y + y * sy, sx + .5, sy + .5);
   }
-  if (r) {
+  if (S.method === 'line') {
+    if (src().roi && mr) { vctx.lineWidth = 2; vctx.strokeStyle = 'rgba(255,255,255,.5)'; vctx.strokeRect(mr.x, mr.y, mr.w, mr.h); }
+    vctx.fillStyle = '#3ddc84';
+    for (const b of T.lineBlobs || []) { const x = b * view.width; vctx.beginPath(); vctx.moveTo(x, 4); vctx.lineTo(x - 12, 26); vctx.lineTo(x + 12, 26); vctx.fill(); }
+    const lx = src().lineX * view.width, hot = performance.now() - GT.flash < 200;
+    vctx.strokeStyle = hot ? '#fff' : '#ff8c1a'; vctx.lineWidth = hot ? 10 : 5;
+    vctx.beginPath(); vctx.moveTo(lx, 0); vctx.lineTo(lx, view.height); vctx.stroke();
+  } else if (r) {
     vctx.lineWidth = 2; vctx.strokeStyle = 'rgba(255,255,255,.8)'; vctx.strokeRect(r.x, r.y, r.w, r.h);
     const cx = r.x + r.w / 2, R = r.w / 2;
     // predicted UP positions from fitted phase
@@ -422,7 +552,10 @@ function drawOverlay() {
 }
 
 function frame(t) {
+  const p0 = performance.now();
   process(t);
+  T.procMs = (T.procMs || 0) * 0.9 + (performance.now() - p0) * 0.1;
+  T.frames = (T.frames || 0) + 1;
   drawOverlay();
   schedule(performance.now());
 }
@@ -492,6 +625,7 @@ async function startFile(f) {
   afterStart(); videoLoop();
 }
 function afterStart() {
+  if (S.method === 'line') return hint('オレンジの線がボールの落ちる位置に重なるようにスマホを固定し、「② UP色」で金色のUP看板をタップしてください');
   const portrait = source === 'camera' && video.videoHeight > video.videoWidth;
   hint(portrait ? 'スマホを横向きにして、1段目のリング全体が映るように離れて撮影してください'
     : !src().roi ? '「① 範囲」を押して、1段目の帯を囲んでください' : '');
@@ -586,6 +720,8 @@ view.addEventListener('pointerdown', e => {
     const [h, s, v] = hsv(r / n, g / n, b / n);
     S.hue = Math.round(h); S.satMin = +Math.max(0.15, s * 0.6).toFixed(2); S.valMin = +Math.max(0.15, v * 0.55).toFixed(2);
     save(); syncUI(); setMode('none');
+  } else if (mode === 'gate' && S.method === 'line') {
+    src().lineX = Math.min(0.95, Math.max(0.05, p.x / view.width)); resetTracking(); save(); setMode('none');
   } else if (mode === 'target' || mode === 'gate') {
     const r = roiPx();
     if (r) {
@@ -602,7 +738,7 @@ view.addEventListener('pointerup', () => {
   if (!drag) return;
   const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1), w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
   drag = null;
-  if (w > view.width * 0.2 && h > 6) {
+  if (S.method === 'line' ? h > view.height * 0.05 : w > view.width * 0.2 && h > 6) {
     src().roi = {x: x / view.width, y: y / view.height, w: w / view.width, h: h / view.height};
     resetTracking(); save(); setMode('none');
   } else hint('範囲が小さすぎます。リングの左端から右端まで、横長になぞってください');
@@ -637,6 +773,9 @@ function syncUI() {
   document.querySelectorAll('[data-k]').forEach(el => { if (el.type === 'checkbox') el.checked = !!S[el.dataset.k]; else el.value = S[el.dataset.k]; });
   document.querySelectorAll('[data-o]').forEach(el => { el.textContent = S[el.dataset.o]; });
   $('#swatch').style.background = `hsl(${S.hue},80%,50%)`;
+  const line = S.method === 'line';
+  $('#helpLine').hidden = !line; $('#helpBand').hidden = line;
+  document.querySelector('[data-mode="target"]').hidden = line;
   setOffset(S.offset);
 }
 function fit() {
@@ -668,8 +807,8 @@ function ui(now) {
     } else { $('#sppv').textContent = '--'; tier.textContent = source === 'none' ? '未計測' : '計測待ち'; tier.className = ''; }
     const cd = $('#cd');
     if (T.status) cd.textContent = T.status;
-    else if (T.next && (ok || !S.onlySlow)) cd.textContent = `次の発射まで ${((T.next.F - now) / 1000).toFixed(2)} 秒` + (S.method === 'gate' && T.gateIv ? `　通過間隔 ${(T.gateIv / 1000).toFixed(2)} 秒` : '');
-    else if (T.fitOk) cd.textContent = '回転が速いので待機中' + (S.method === 'gate' && T.gateIv ? `　通過間隔 ${(T.gateIv / 1000).toFixed(2)} 秒` : '');
+    else if (T.next && (ok || !S.onlySlow)) cd.textContent = `次の発射まで ${((T.next.F - now) / 1000).toFixed(2)} 秒` + (S.method !== 'band' && T.gateIv ? `　通過間隔 ${(T.gateIv / 1000).toFixed(2)} 秒` : '');
+    else if (T.fitOk) cd.textContent = '回転が速いので待機中' + (S.method !== 'band' && T.gateIv ? `　通過間隔 ${(T.gateIv / 1000).toFixed(2)} 秒` : '');
     else cd.textContent = '';
   }
   // approach bar
@@ -696,13 +835,17 @@ function ui(now) {
   g.clearRect(0, 0, gw, gh);
   const lo = 0.55, hi = 1.15, Y = v => gh - (Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo) * gh;
   g.strokeStyle = '#3ddc84'; g.setLineDash([4 * dpr, 4 * dpr]); g.beginPath(); g.moveTo(0, Y(S.slowThr)); g.lineTo(gw, Y(S.slowThr)); g.stroke(); g.setLineDash([]);
+  // band mode updates every frame; crossing modes about every 2–3 s, so allow longer gaps there
+  const maxGap = S.method === 'band' ? 400 : 8000;
   g.strokeStyle = '#f5c542'; g.lineWidth = 2 * dpr; g.beginPath(); let prevT = -1e9;
   for (const p of T.sppHist) {
     const x = gw - (now - p.t) / 60000 * gw;
-    if (p.t - prevT > 400) g.moveTo(x, Y(p.v)); else g.lineTo(x, Y(p.v));
+    if (p.t - prevT > maxGap) g.moveTo(x, Y(p.v)); else g.lineTo(x, Y(p.v));
     prevT = p.t;
   }
   g.stroke(); g.lineWidth = 1;
+  g.fillStyle = '#f5c542';
+  if (S.method !== 'band') for (const p of T.sppHist) { const x = gw - (now - p.t) / 60000 * gw; g.beginPath(); g.arc(x, Y(p.v), 3 * dpr, 0, Math.PI * 2); g.fill(); }
   g.fillStyle = '#9a9a9a'; g.font = `${11 * dpr}px sans-serif`; g.fillText('速度（直近60秒・上ほど遅い）', 6 * dpr, 14 * dpr);
   requestAnimationFrame(ui);
 }

@@ -100,6 +100,7 @@ input[type=range]{width:100%;accent-color:var(--acc)}
       <button data-mode="target">③ 落下位置</button>
       <button data-mode="gate" id="bGate">④ 検知位置</button>
     </div>
+    <div class="offrow" style="margin-top:8px"><span id="lockSt" style="flex:1;font-size:14px;color:var(--mut)">カメラ: 自動</span><button id="bLock" style="flex:0 0 auto">カメラを固定</button></div>
     <div class="set"><label>計測方式</label><span></span>
       <select data-k="method" style="grid-column:1/3;font-size:16px;padding:8px;background:#2a2a2a;color:var(--fg);border:1px solid #444;border-radius:8px">
         <option value="line">中央ライン（縦線をUPが通る間隔）※おすすめ</option>
@@ -107,8 +108,8 @@ input[type=range]{width:100%;accent-color:var(--acc)}
         <option value="band">帯全体で追跡（見えている全UPの動き）</option>
       </select>
     </div>
-    <p class="help" id="helpLine"><b>中央ライン方式</b>：スマホを縦に固定し、オレンジの縦線がボールの落ちる位置に重なるように置きます。あとは「② UP色」で金色のUP看板をタップするだけです。線の位置は「④ 検知位置」でタップして動かせます。①③は不要です（① 範囲を設定した場合は、その上下の範囲だけを見ます）。</p>
-    <p class="help" id="helpBand">① 1段目リングを左端から右端まで指でなぞって囲む。リングは横にしか動かないので、縦はUP看板と柱が確実に入るよう広めでOK（土台や飾りなど動かない金色は自動で無視します）<br>② 金色のUP看板をタップして色を覚えさせる<br>③ ボールがリングに落ちる位置をタップ（水色の線）<br>④ 通過タイミング方式で、UPの通過を検知する位置をタップ（オレンジの線）。落下位置と同じ場所が基本ですが、見えにくい時は手前にずらせます</p>
+    <p class="help" id="helpLine"><b>中央ライン方式</b>：スマホを縦に固定し、オレンジの縦線がボールの落ちる位置に重なるように置きます。あとは「② UP色」で金色のUP看板を指でなぞって囲むだけです（看板全体の色のばらつきから許容幅を自動で決めます。タップでもOK）。色を覚えた時点でカメラの明るさ・色味・ピントを固定し、照明の変化で色がずれにくくします。線の位置は「④ 検知位置」でタップして動かせます。①③は不要です（① 範囲を設定した場合は、その上下の範囲だけを見ます）。</p>
+    <p class="help" id="helpBand">① 1段目リングを左端から右端まで指でなぞって囲む。リングは横にしか動かないので、縦はUP看板と柱が確実に入るよう広めでOK（土台や飾りなど動かない金色は自動で無視します）<br>② 金色のUP看板を指でなぞって囲み、色を覚えさせる（タップでもOK。カメラの明るさ・色味も固定されます）<br>③ ボールがリングに落ちる位置をタップ（水色の線）<br>④ 通過タイミング方式で、UPの通過を検知する位置をタップ（オレンジの線）。落下位置と同じ場所が基本ですが、見えにくい時は手前にずらせます</p>
   </section>
 
   <section>
@@ -552,6 +553,10 @@ function drawOverlay() {
 }
 
 function frame(t) {
+  if (mode === 'color') { // keep an overlay-free copy for colour learning
+    if (clean.width !== view.width || clean.height !== view.height) { clean.width = view.width; clean.height = view.height; }
+    cctx.drawImage(view, 0, 0);
+  }
   const p0 = performance.now();
   process(t);
   T.procMs = (T.procMs || 0) * 0.9 + (performance.now() - p0) * 0.1;
@@ -564,6 +569,7 @@ function frame(t) {
 function stopAll() {
   gen++;
   if (stream) { stream.getTracks().forEach(tr => tr.stop()); stream = null; }
+  camLocked = false; showLock('自動');
   video.pause(); video.removeAttribute('src'); video.srcObject = null;
   $('#practice').hidden = true; $('#zoomRow').hidden = true;
   T.unw = null; T.hist = []; T.sppHist = []; T.fitOk = false;
@@ -706,21 +712,14 @@ function setMode(m) {
   mode = mode === m ? 'none' : m;
   view.classList.toggle('edit', mode !== 'none');
   document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('sel', b.dataset.mode === mode));
-  hint({roi: '1段目リングを左端から右端まで囲んでください（縦は広めでOK）', color: '金色のUP看板をタップしてください', target: 'ボールが落ちる位置をタップしてください', gate: 'UPの通過を検知する位置をタップしてください（オレンジの線）', none: ''}[mode]);
+  hint({roi: '1段目リングを左端から右端まで囲んでください（縦は広めでOK）', color: '金色のUP看板を指でなぞって囲んでください（タップでもOK）', target: 'ボールが落ちる位置をタップしてください', gate: 'UPの通過を検知する位置をタップしてください（オレンジの線）', none: ''}[mode]);
 }
 function cpos(e) { const b = view.getBoundingClientRect(); return {x: (e.clientX - b.left) * view.width / b.width, y: (e.clientY - b.top) * view.height / b.height}; }
 view.addEventListener('pointerdown', e => {
   if (source === 'none') return;
   const p = cpos(e);
-  if (mode === 'roi') { drag = {x0: p.x, y0: p.y, x1: p.x, y1: p.y}; view.setPointerCapture(e.pointerId); }
-  else if (mode === 'color') {
-    const d = vctx.getImageData(Math.max(0, p.x - 3), Math.max(0, p.y - 3), 7, 7).data;
-    let r = 0, g = 0, b = 0, n = d.length / 4;
-    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
-    const [h, s, v] = hsv(r / n, g / n, b / n);
-    S.hue = Math.round(h); S.satMin = +Math.max(0.15, s * 0.6).toFixed(2); S.valMin = +Math.max(0.15, v * 0.55).toFixed(2);
-    save(); syncUI(); setMode('none');
-  } else if (mode === 'gate' && S.method === 'line') {
+  if (mode === 'roi' || mode === 'color') { drag = {x0: p.x, y0: p.y, x1: p.x, y1: p.y}; try { view.setPointerCapture(e.pointerId); } catch (err) {} }
+  else if (mode === 'gate' && S.method === 'line') {
     src().lineX = Math.min(0.95, Math.max(0.05, p.x / view.width)); resetTracking(); save(); setMode('none');
   } else if (mode === 'target' || mode === 'gate') {
     const r = roiPx();
@@ -737,12 +736,85 @@ view.addEventListener('pointermove', e => { if (drag) { const p = cpos(e); drag.
 view.addEventListener('pointerup', () => {
   if (!drag) return;
   const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1), w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
+  const cx = drag.x0, cy = drag.y0;
   drag = null;
+  if (mode === 'color') {
+    // a tap samples around the point; a drag samples the whole box
+    const tap = w < 12 && h < 12;
+    learnColor(tap ? {x: cx - 6, y: cy - 6, w: 13, h: 13} : {x, y, w, h});
+    return;
+  }
   if (S.method === 'line' ? h > view.height * 0.05 : w > view.width * 0.2 && h > 6) {
     src().roi = {x: x / view.width, y: y / view.height, w: w / view.width, h: h / view.height};
     resetTracking(); save(); setMode('none');
   } else hint('範囲が小さすぎます。リングの左端から右端まで、横長になぞってください');
 });
+
+// ---------- colour learning from a tapped point or a dragged box ----------
+const clean = document.createElement('canvas'), cctx = clean.getContext('2d', {willReadFrequently: true});
+function learnColor(r) {
+  const x = Math.max(0, Math.round(r.x)), y = Math.max(0, Math.round(r.y));
+  const w = Math.min(clean.width - x, Math.round(r.w)), h = Math.min(clean.height - y, Math.round(r.h));
+  if (w < 1 || h < 1) return;
+  const d = cctx.getImageData(x, y, w, h).data, px = [];
+  for (let i = 0; i < d.length; i += 4) { const c = hsv(d[i], d[i + 1], d[i + 2]); if (c[1] >= 0.2 && c[2] >= 0.15) px.push(c); }
+  if (px.length < 5) { hint('金色が見つかりません。UP看板の上をもう一度なぞってください'); return; }
+  // dominant hue (5° bins weighted by saturation × value), so dark/grey background in the box is ignored
+  const bins = new Float32Array(72);
+  for (const [hh, s, v] of px) bins[Math.floor(hh / 5) % 72] += s * v;
+  let pk = 0, best = -1;
+  for (let b = 0; b < 72; b++) { const sc = bins[(b + 71) % 72] + bins[b] + bins[(b + 1) % 72]; if (sc > best) { best = sc; pk = b; } }
+  let center = pk * 5 + 2.5;
+  const near = px.filter(p => hueDist(p[0], center) <= 25);
+  let sx = 0, sy = 0;
+  for (const p of near) { sx += Math.cos(p[0] * D2R); sy += Math.sin(p[0] * D2R); }
+  center = (Math.atan2(sy, sx) / D2R + 360) % 360;
+  // spread of the gold pixels -> tolerances (percentiles, so a few odd pixels don't widen them)
+  const pct = (a, q) => { a.sort((m, n) => m - n); return a[Math.min(a.length - 1, Math.floor(q * a.length))]; };
+  S.hue = Math.round(center);
+  S.hueTol = Math.round(Math.min(30, Math.max(10, pct(near.map(p => hueDist(p[0], center)), 0.9) + 4)));
+  S.satMin = +Math.max(0.15, pct(near.map(p => p[1]), 0.1) * 0.8).toFixed(2);
+  S.valMin = +Math.max(0.12, pct(near.map(p => p[2]), 0.1) * 0.8).toFixed(2);
+  let hit = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const [hh, s, v] = hsv(d[i], d[i + 1], d[i + 2]);
+    if (s >= S.satMin && v >= S.valMin && hueDist(hh, S.hue) <= S.hueTol) hit++;
+  }
+  save(); syncUI(); setMode('none'); resetTracking();
+  const msg = `色を覚えました（色相${S.hue}°±${S.hueTol}、囲んだ範囲の${Math.round(hit / (d.length / 4) * 100)}%を金色と判定）`;
+  hint(msg);
+  if (source === 'camera') lockCamera(true).then(m => { hint(msg + '　' + m); setTimeout(() => { if ($('#hint').textContent.startsWith('色を覚えました')) hint(''); }, 8000); });
+}
+
+// ---------- camera auto-adjust lock (exposure / white balance / focus) ----------
+let camLocked = false;
+async function lockCamera(lock) {
+  const tr = stream && stream.getVideoTracks()[0];
+  if (!tr || !tr.getCapabilities) { showLock('非対応'); return 'この端末はカメラの固定に非対応です'; }
+  const cap = tr.getCapabilities(), st = tr.getSettings(), done = [];
+  const tryApply = async (c, name) => { try { await tr.applyConstraints({advanced: [c]}); done.push(name); } catch (e) {} };
+  const pick = (modes) => modes?.includes('manual') ? 'manual' : modes?.includes('single-shot') ? 'single-shot' : null;
+  if (lock) {
+    // manual with the current values when the device reports them, otherwise measure once and hold
+    let m = pick(cap.exposureMode);
+    if (m === 'manual' && st.exposureTime) await tryApply({exposureMode: 'manual', exposureTime: st.exposureTime, ...(st.iso ? {iso: st.iso} : {})}, '明るさ');
+    else if (cap.exposureMode?.includes('single-shot')) await tryApply({exposureMode: 'single-shot'}, '明るさ');
+    m = pick(cap.whiteBalanceMode);
+    if (m === 'manual' && st.colorTemperature) await tryApply({whiteBalanceMode: 'manual', colorTemperature: st.colorTemperature}, '色味');
+    else if (cap.whiteBalanceMode?.includes('single-shot')) await tryApply({whiteBalanceMode: 'single-shot'}, '色味');
+    m = pick(cap.focusMode);
+    if (m === 'manual' && st.focusDistance != null) await tryApply({focusMode: 'manual', focusDistance: st.focusDistance}, 'ピント');
+    else if (cap.focusMode?.includes('single-shot')) await tryApply({focusMode: 'single-shot'}, 'ピント');
+    camLocked = done.length > 0;
+    showLock(camLocked ? '固定中（' + done.join('・') + '）' : '非対応');
+    return camLocked ? `カメラの${done.join('・')}を固定しました` : 'この端末はカメラの固定に非対応です（自動調整のまま動きます）';
+  }
+  for (const [k, n] of [['exposureMode', '明るさ'], ['whiteBalanceMode', '色味'], ['focusMode', 'ピント']])
+    if (cap[k]?.includes('continuous')) await tryApply({[k]: 'continuous'}, n);
+  camLocked = false; showLock('自動');
+  return 'カメラを自動調整に戻しました';
+}
+function showLock(s) { $('#lockSt').textContent = 'カメラ: ' + s; $('#bLock').textContent = camLocked ? '固定を解除' : 'カメラを固定'; }
 
 // ---------- UI wiring ----------
 const counts = {hit: 0, early: 0, late: 0};
@@ -757,6 +829,10 @@ $('#hit').onclick = () => { counts.hit++; showCounts(); };
 $('#rstc').onclick = () => { counts.hit = counts.early = counts.late = 0; showCounts(); };
 $('#off').oninput = e => setOffset(+e.target.value);
 $('#bCam').onclick = startCamera;
+$('#bLock').onclick = async () => {
+  if (source !== 'camera') return hint('カメラ使用中のみ固定できます');
+  hint(await lockCamera(!camLocked));
+};
 $('#bDemo').onclick = startDemo;
 $('#fileIn').onchange = e => { if (e.target.files[0]) startFile(e.target.files[0]); };
 $('#fire').onclick = demoFire;

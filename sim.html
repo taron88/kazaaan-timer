@@ -42,6 +42,17 @@ html,body{margin:0;height:100%;background:#000;color:var(--fg);font-family:syste
   <input type="range" id="jit" min="0" max="80" step="5">
   <label><span>回転方向</span><select id="dir"><option value="1">左→右</option><option value="-1">右→左</option></select></label>
   <label><span><input type="checkbox" id="led"> LED点滅（誤検出テスト）</span></label>
+  <label>照明の色
+    <select id="tint">
+      <option value="">通常</option>
+      <option value="dark">暗い</option>
+      <option value="warm">赤っぽい</option>
+      <option value="cool">青っぽい</option>
+      <option value="bright">白飛び気味</option>
+      <option value="heavy">強い色かぶり（暗い赤）</option>
+      <option value="pale">くすんだ金色</option>
+    </select>
+  </label>
   <label><span><input type="checkbox" id="hud" checked> 正解表示（速度・結果）</span></label>
   <div class="row"><button id="fs">全画面</button><button id="hide">パネルを隠す</button></div>
   <button id="rst">記録リセット</button>
@@ -55,7 +66,9 @@ const cv = $('#c'), c = cv.getContext('2d');
 const D2R = Math.PI / 180, VW = 1600, VH = 900;
 const PATTERN = ['OUT', 'OUT', 'UP', 'OUT', 'DIA', 'UP'];
 const TIERS = [1.00, 0.86, 0.75, 0.66], TNAME = ['超低速', '低速', '中速', '高速'];
-const cfg = {mode: 'auto', delay: 700, jit: 30, dir: 1, led: false, hud: true};
+const cfg = {mode: 'auto', delay: 700, jit: 30, dir: 1, led: false, hud: true, tint: ''};
+const TINT = {'': 'none', dark: 'brightness(0.55)', warm: 'sepia(0.4) saturate(1.4) hue-rotate(-14deg)', cool: 'hue-rotate(14deg) saturate(0.8) brightness(0.9)', bright: 'brightness(1.45) contrast(0.8)',
+  heavy: 'hue-rotate(-28deg) saturate(0.6) brightness(0.55)', pale: 'saturate(0.35) brightness(0.8)'};
 try { Object.assign(cfg, JSON.parse(localStorage.getItem('kzn-sim') || '{}')); } catch (e) {}
 const save = () => { try { localStorage.setItem('kzn-sim', JSON.stringify(cfg)); } catch (e) {} };
 
@@ -229,10 +242,12 @@ function frame(now) {
   c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
   const sc = Math.min(W / VW, H / VH);
   c.setTransform(sc, 0, 0, sc, (W - VW * sc) / 2, (H - VH * sc) / 2);
+  c.filter = TINT[cfg.tint] || 'none'; // lighting / camera colour cast
   c.drawImage(bg, 0, 0);
   drawPockets(now);
   drawForeground(now);
   drawBalls(now);
+  c.filter = 'none';
   drawHud(now);
   requestAnimationFrame(frame);
 }
@@ -241,7 +256,7 @@ function frame(now) {
 function sync() {
   $('#mode').value = cfg.mode; $('#delay').value = cfg.delay; $('#dlv').textContent = cfg.delay + 'ms';
   $('#jit').value = cfg.jit; $('#jtv').textContent = cfg.jit + 'ms'; $('#dir').value = cfg.dir;
-  $('#led').checked = cfg.led; $('#hud').checked = cfg.hud;
+  $('#led').checked = cfg.led; $('#hud').checked = cfg.hud; $('#tint').value = cfg.tint;
 }
 $('#fire').onclick = e => { e.stopPropagation(); fire(); };
 $('#mode').onchange = e => { cfg.mode = e.target.value; st.nextChange = 0; save(); };
@@ -249,6 +264,7 @@ $('#delay').oninput = e => { cfg.delay = +e.target.value; save(); sync(); };
 $('#jit').oninput = e => { cfg.jit = +e.target.value; save(); sync(); };
 $('#dir').onchange = e => { cfg.dir = +e.target.value; save(); };
 $('#led').onchange = e => { cfg.led = e.target.checked; save(); };
+$('#tint').onchange = e => { cfg.tint = e.target.value; save(); };
 $('#hud').onchange = e => { cfg.hud = e.target.checked; save(); };
 $('#rst').onclick = () => { st.stats = {up: 0, n: 0}; st.result = null; };
 $('#fs').onclick = () => { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}); };

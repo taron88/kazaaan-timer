@@ -218,8 +218,7 @@ function goldMask(x0, y0, w, h, PW, PH) {
   return col;
 }
 
-// Line mode mask: per-pixel static removal + automatic choice of the rows the UPs travel along.
-// Over time an UP row has moving gold across many columns; a blinking lamp only at a few.
+// Line mode mask: gold pixels minus the ones that are gold most of the time.
 function lineMask(y0, h, PW, PH) {
   const W = view.width;
   if (proc.width !== PW) proc.width = PW;
@@ -236,35 +235,74 @@ function lineMask(y0, h, PW, PH) {
     let dh = Math.abs(hh - H0); if (dh > 180) dh = 360 - dh;
     if (dh <= HT) mask[i] = 1;
   }
-  T.mask = mask; T.mw = PW; T.mh = PH; T.maskRect = {x: 0, y: y0, w: W, h};
+  T.maskRect = {x: 0, y: y0, w: W, h}; T.mw = PW; T.mh = PH;
+  // brightness profile per horizontal band (column means), used to measure how far the ring moved
+  const NB = 8, bh = Math.floor(PH / NB), prof = new Float32Array(NB * PW);
+  for (let b = 0; b < NB; b++) for (let y = b * bh; y < (b + 1) * bh; y++) for (let x = 0; x < PW; x++) {
+    const p = (y * PW + x) * 4; prof[b * PW + x] += d[p] + d[p + 1] + d[p + 2];
+  }
+  T.prof = prof; T.profNB = NB;
+  // Per-pixel share of time the pixel has been gold over the last ~5 s. An UP covers a given
+  // pixel only part of the time (~25–35 %), while fixed gold (rail, decorations) is gold most of
+  // the time even with camera noise, so "gold now and usually not gold" = a passing UP.
   const now = performance.now();
   let L = T.lm;
-  if (!L || L.n !== N) L = T.lm = {n: N, b: [], cur: Uint8Array.from(mask), stat: new Uint8Array(N), t: now, cov: new Float32Array(PH)};
-  if (now - L.t > 500) {
-    // close the 0.5 s bucket ("gold in every frame of it"); static = gold in every bucket of the last ~6 s
-    L.b.push(L.cur); if (L.b.length > 12) L.b.shift();
-    L.stat = Uint8Array.from(L.b[0]);
-    for (let k = 1; k < L.b.length; k++) { const a = L.b[k], s = L.stat; for (let i = 0; i < N; i++) s[i] &= a[i]; }
-    L.cur = Uint8Array.from(mask); L.t = now;
-  }
-  const cur = L.cur, stat = L.stat;
-  const mov = new Uint8Array(N), rowN = new Float32Array(PH);
+  if (!L || L.n !== N) L = T.lm = {n: N, f: new Float32Array(N), t: now, t0: now};
+  const a = Math.min(0.2, (now - L.t) / 5000), f = L.f; L.t = now;
+  const mov = new Uint8Array(N), col = new Float32Array(PW);
   for (let i = 0; i < N; i++) {
-    cur[i] &= mask[i];
-    if (mask[i] && !stat[i]) { mov[i] = 1; rowN[(i / PW) | 0]++; }
+    const m = mask[i];
+    if (m && f[i] < 0.6) { mov[i] = 1; col[i % PW]++; }
+    f[i] += (m - f[i]) * a;
   }
-  let cmax = 0;
-  for (let y = 0; y < PH; y++) { L.cov[y] += (rowN[y] / PW - L.cov[y]) * 0.01; if (L.cov[y] > cmax) cmax = L.cov[y]; }
-  const col = new Float32Array(PW); let nr = 0;
-  const shown = new Uint8Array(N); // display only what is actually counted
-  if (cmax > 0) for (let y = 0; y < PH; y++) if (L.cov[y] >= cmax * 0.4) {
-    nr++;
-    for (let x = 0; x < PW; x++) { const i = y * PW + x; col[x] += mov[i]; shown[i] = mov[i]; }
-  }
-  if (nr) for (let x = 0; x < PW; x++) col[x] /= nr;
-  T.mask = shown;
-  T.lineRows = nr;
+  for (let x = 0; x < PW; x++) col[x] /= PH;
+  T.mask = mov; // display only what is actually counted
+  T.lineWarm = now - L.t0 > 2500;
   return col;
+}
+
+// ---------- ring motion: horizontal shift between frames, from band profiles ----------
+// The ring's speed changes even between two UPs, so the next UP is predicted from how far the
+// ring still has to travel and how fast it moves right now. The shift is found by matching the
+// derivative of each band's brightness profile against the previous frame; bands that barely
+// change (static artwork above the ring) are left out.
+const FL = {prev: null, energy: null, X: 0, hist: [], v: 0, vs: []};
+function flowStep(t) {
+  const prof = T.prof, NB = T.profNB, PW = T.mw;
+  if (!FL.prev || FL.prev.length !== prof.length) { FL.prev = prof; FL.energy = new Float32Array(NB); FL.hist = [{t, X: FL.X}]; return; }
+  const MAXS = Math.round(PW * 0.17), shifts = [];
+  for (let b = 0; b < NB; b++) {
+    const o = b * PW; let e = 0;
+    const a = new Float32Array(PW - 1), c = new Float32Array(PW - 1);
+    for (let x = 0; x < PW - 1; x++) { a[x] = FL.prev[o + x + 1] - FL.prev[o + x]; c[x] = prof[o + x + 1] - prof[o + x]; e += Math.abs(prof[o + x] - FL.prev[o + x]); }
+    FL.energy[b] += (e / PW - FL.energy[b]) * 0.05;
+    const err = new Float32Array(2 * MAXS + 1);
+    let bi = 0;
+    for (let s = -MAXS; s <= MAXS; s++) { // content moved by s: c(x) ≈ a(x - s)
+      let sum = 0, n = 0;
+      for (let x = Math.max(0, s); x < Math.min(PW - 1, PW - 1 + s); x++) { sum += Math.abs(c[x] - a[x - s]); n++; }
+      err[s + MAXS] = sum / n; if (err[s + MAXS] < err[bi]) bi = s + MAXS;
+    }
+    let sub = 0; // parabolic sub-pixel refinement
+    if (bi > 0 && bi < 2 * MAXS) { const l = err[bi - 1], m = err[bi], r = err[bi + 1], den = l - 2 * m + r; if (den > 0) sub = 0.5 * (l - r) / den; }
+    shifts.push({b, s: bi - MAXS + sub});
+  }
+  FL.prev = prof;
+  // median of the 4 bands that change most (the ring); tested against real footage, this beat
+  // match-quality based band selection. From far away it can be wrong, which the interval check
+  // in lineProcess catches (falls back to the UP-to-UP interval).
+  const top = shifts.slice().sort((p, q) => FL.energy[q.b] - FL.energy[p.b]).slice(0, 4).map(p => p.s).sort((p, q) => p - q);
+  const s = (top[1] + top[2]) / 2 / PW;             // in screen widths
+  const dt = t - FL.hist[FL.hist.length - 1].t;
+  FL.X += s;
+  FL.hist.push({t, X: FL.X}); while (FL.hist.length > 150) FL.hist.shift();
+  if (dt > 0 && dt < 200) { FL.vs.push(s / dt); if (FL.vs.length > 10) FL.vs.shift(); }
+  FL.v = FL.vs.reduce((p, q) => p + q, 0) / (FL.vs.length || 1); // screen widths per ms (signed)
+}
+function flowXAt(t) { // ring position at time t (interpolated from recent frames)
+  const h = FL.hist; if (!h.length) return FL.X;
+  for (let i = h.length - 1; i > 0; i--) if (h[i - 1].t <= t) { const a = h[i - 1], b = h[i]; return a.X + (b.X - a.X) * ((t - a.t) / ((b.t - a.t) || 1)); }
+  return h[0].X;
 }
 
 // ---------- line method: UP crossing a vertical line (phone fixed in portrait) ----------
@@ -273,55 +311,56 @@ function lineProcess(t) {
   const y0 = s.roi ? s.roi.y * H : 0, h = s.roi ? s.roi.h * H : H;
   const PW = 360, PH = Math.max(8, Math.min(160, Math.round(PW * h / W)));
   const col = lineMask(y0, h, PW, PH);
-  // find moving-gold blobs across the whole width (the UP may be small, so threshold on the strongest column)
-  const sm = new Float32Array(PW); let top = 0;
-  for (let x = 0; x < PW; x++) {
-    let a = 0, n = 0;
-    for (let k = -1; k <= 1; k++) { const j = x + k; if (j >= 0 && j < PW) { a += col[j]; n++; } }
-    sm[x] = a / n; if (sm[x] > top) top = sm[x];
-  }
-  const blobs = [];
-  if (top >= 0.05) {
-    // Absolute threshold (a tall bright object elsewhere, e.g. a neon tube, must not hide a small UP),
-    // then each blob is weighted against its own peak so faint fringes don't bias the centre.
-    // Gap closing scales with the on-screen spacing between UPs (learned below), so sign + pillars merge.
-    const thr = 0.05, on = new Uint8Array(PW), GAP = Math.round(PW * (T.upSp || 0.25) * 0.4);
-    for (let x = 0; x < PW; x++) on[x] = sm[x] > thr;
-    for (let x = 0, last = -1; x < PW; x++) if (on[x]) { if (last >= 0 && x - last > 1 && x - last <= GAP + 1) for (let j = last + 1; j < x; j++) on[j] = 1; last = x; }
-    for (let x = 0; x < PW;) {
-      if (!on[x]) { x++; continue; }
-      const xs = x; let pk = 0;
-      while (x < PW && on[x]) { if (sm[x] > pk) pk = sm[x]; x++; }
-      let a = 0, ax = 0;
-      for (let j = xs; j < x; j++) { const w = sm[j] - pk * 0.3; if (w > 0) { a += w; ax += w * j; } }
-      if (x - xs >= 2 && a > 0) blobs.push((ax / a + 0.5) / PW);
+  flowStep(t);
+  // How much moving gold sits on the line right now (thin strip around it).
+  // Works at any zoom: in a close-up the UP fills the screen, from afar it is small,
+  // but either way it covers the line for a while as it passes.
+  const lx = s.lineX * PW, hw = Math.max(2, Math.round(PW * 0.03));
+  let p = 0, n = 0;
+  for (let x = Math.max(0, Math.round(lx - hw)); x <= Math.min(PW - 1, Math.round(lx + hw)); x++) { p += col[x]; n++; }
+  p /= n;
+  const P = GT.pres ||= {max: 0, on: false, ts: 0, lastOn: 0, durs: []};
+  P.max = Math.max(p, P.max * 0.9995);
+  // (from afar the UP covers only a few rows of the frame, so the absolute floor is low)
+  const on = T.lineWarm && p > 0.004 && p > P.max * 0.4; // wait until fixed gold has been learned
+  T.lineP = p; T.lineOn = on;
+  if (on) { if (!P.on) { P.on = true; P.ts = t; } P.lastOn = t; }
+  else if (P.on && t - P.lastOn > 150) { // short dark gaps (between pillar and sign) are bridged
+    P.on = false;
+    // The UP is wide, so it stays on the line far longer than small yellow things
+    // (e.g. the skull on OUT signs); judge by time, which doesn't depend on zoom.
+    const d = P.lastOn - P.ts, med = P.durs.length ? P.durs.slice().sort((a, b) => a - b)[P.durs.length >> 1] : 0;
+    // An UP spends about 0.5–0.9 s on the line; much longer means something else (not counted).
+    if (d >= 250 && d <= 1600 && (!med || d >= med * 0.45)) {
+      P.durs.push(d); if (P.durs.length > 9) P.durs.shift();
+      T.lastDur = d;
+      const tc = (P.ts + P.lastOn) / 2; // centre of the UP = middle of its time on the line
+      onCross(tc, -1, 0);
+      // ring distance between two UPs (3 pockets), measured with the motion estimate
+      const xc = flowXAt(tc), U = GT.upX ||= [];
+      if (U.length) {
+        let d = Math.abs(xc - U[U.length - 1]);
+        if (GT.upP && d > GT.upP * 1.6) d /= Math.round(d / GT.upP); // an UP was missed in between
+        if (d > 0.05) GT.upP = GT.upP ? GT.upP + (d - GT.upP) * 0.3 : d;
+      }
+      U.push(xc); if (U.length > 10) U.shift();
+      GT.upT = tc;
     }
   }
-  T.lineBlobs = blobs;
-  // learn the on-screen spacing between neighbouring UPs near the line
-  for (let i = 1; i < blobs.length; i++) {
-    const d = blobs[i] - blobs[i - 1], mid = (blobs[i] + blobs[i - 1]) / 2;
-    if (Math.abs(mid - s.lineX) < 0.25 && d > 0.08 && d < 0.6) T.upSp = T.upSp ? T.upSp + (d - T.upSp) * 0.02 : d;
-  }
-  const sp = T.upSp || 0.25;
-  // track every blob frame to frame; a crossing is a tracked blob that travelled across the line.
-  // Blinking lights that stay in place never travel, so they are never counted.
-  const prev = (GT.tracks && t - GT.tracksT < 300) ? GT.tracks : [];
-  const tracks = [];
-  for (const b of blobs) {
-    const u = b - s.lineX;
-    let m = null;
-    for (const q of prev) if (Math.abs(q.u - u) < sp * 0.25 && (!m || Math.abs(q.u - u) < Math.abs(m.u - u))) m = q;
-    const tr = {u, origin: m ? m.origin : u, age: m ? m.age + 1 : 0};
-    if (m && m.u !== 0 && Math.sign(u) !== Math.sign(m.u) && Math.sign(m.origin) === Math.sign(m.u) && Math.abs(m.origin) > sp * 0.3 && m.age >= 5) {
-      const f = m.u / (m.u - u), tc = GT.tracksT + f * (t - GT.tracksT);
-      onCross(tc, u > 0 ? 1 : -1, 0);
-      tr.origin = u;
+  // Speed from the motion estimate, every frame (the UP-to-UP interval lags a speed change)
+  if (GT.upP && Math.abs(FL.v) > 1e-6) {
+    const perMs = GT.upP / Math.abs(FL.v);
+    // trust it only while UPs are still being seen and it roughly agrees with the UP-to-UP interval
+    T.flowOk = t - GT.upT < perMs * 2.5 && (!T.gateIv || Math.abs(perMs / T.gateIv - 1) < 0.4);
+    if (T.flowOk) {
+      T.spp = perMs / 1000 / (S.pockets / S.ups); T.fitOk = true;
+      if (!T.lastHistT || t - T.lastHistT > 250) {
+        T.lastHistT = t; T.sppHist.push({t: performance.now(), v: T.spp});
+        while (T.sppHist.length && performance.now() - T.sppHist[0].t > 60000) T.sppHist.shift();
+      }
     }
-    tracks.push(tr);
-  }
-  GT.tracks = tracks; GT.tracksT = t;
-  if (GT.last && T.fitOk && t - GT.last > 2.5 * (T.gateIv || 3000)) T.fitOk = false;
+  } else T.flowOk = false;
+  if (GT.last && T.fitOk && !T.flowOk && t - GT.last > 2.5 * (T.gateIv || 3000)) T.fitOk = false;
   T.status = T.fitOk ? '' : GT.last ? 'UPの通過を待っています…' : 'UPがオレンジの線を通るのを待っています…';
 }
 
@@ -402,7 +441,7 @@ function process(t) {
 
 // ---------- gate method: time between UP crossings at one point ----------
 const GT = {prev: null, last: null, flash: 0};
-function resetTracking() { T.base = null; T.lm = null; T.unw = null; T.hist = []; T.sppHist = []; T.fitOk = false; T.spp = null; GT.prev = null; GT.last = null; GT.tracks = null; }
+function resetTracking() { T.base = null; T.lm = null; T.unw = null; T.hist = []; T.sppHist = []; T.fitOk = false; T.spp = null; GT.prev = null; GT.last = null; GT.tracks = null; GT.pres = null; GT.upX = null; GT.upP = 0; GT.upT = 0; T.flowOk = false; FL.prev = null; FL.vs = []; FL.v = 0; }
 function gateProcess(t) {
   const gu = src().gateX * 2 - 1, gth = Math.asin(gu) / D2R;
   // merge blobs belonging to the same UP (sign + pillars)
@@ -429,6 +468,8 @@ function gateProcess(t) {
   else T.status = '';
 }
 function onCross(tc, dir, gth) {
+  // diagnostic log (video time when playing a file) for checking against recordings
+  (GT.log ||= []).push({vt: source === 'file' ? video.currentTime : null, tc, dir}); if (GT.log.length > 200) GT.log.shift();
   if (GT.last && tc - GT.last < Math.max(800, 0.5 * (T.gateIv || 0))) return; // jitter around the line
   GT.flash = performance.now();  if (GT.last) {
     const per = S.pockets / S.ups;
@@ -449,6 +490,17 @@ function onCross(tc, dir, gth) {
 const targetTh = () => S.method === 'line' ? 0 : Math.asin(src().targetX * 2 - 1) / D2R;
 function nextFire(now) {
   if (!T.fitOk || !isFinite(T.spp)) return null;
+  if (S.method === 'line' && T.flowOk) {
+    // remaining ring distance to the next UP, at the current speed
+    const last = FL.hist[FL.hist.length - 1], v = Math.abs(FL.v);
+    const xNow = FL.X + FL.v * (now - last.t);
+    let rem = GT.upP - Math.abs(xNow - GT.upX[GT.upX.length - 1]);
+    while (rem < 0) rem += GT.upP;
+    const perMs = GT.upP / v;
+    let F = now + rem / v - S.offset;
+    while (F < now - 30) F += perMs;
+    return {F, perMs};
+  }
   const P = 360 / S.ups, om = T.omega, aom = Math.abs(om), sg = Math.sign(om);
   const ph = T.fitU + om * (now - T.fitT) / 1000;
   let delta = ((targetTh() - ph) * sg) % P; if (delta < 0) delta += P;
@@ -519,8 +571,10 @@ function drawOverlay() {
   }
   if (S.method === 'line') {
     if (src().roi && mr) { vctx.lineWidth = 2; vctx.strokeStyle = 'rgba(255,255,255,.5)'; vctx.strokeRect(mr.x, mr.y, mr.w, mr.h); }
-    vctx.fillStyle = '#3ddc84';
-    for (const b of T.lineBlobs || []) { const x = b * view.width; vctx.beginPath(); vctx.moveTo(x, 4); vctx.lineTo(x - 12, 26); vctx.lineTo(x + 12, 26); vctx.fill(); }
+    if (T.lineOn) { // UP gold is on the line right now
+      const w = view.width * 0.06;
+      vctx.fillStyle = 'rgba(61,220,132,.25)'; vctx.fillRect(src().lineX * view.width - w / 2, mr ? mr.y : 0, w, mr ? mr.h : view.height);
+    }
     const lx = src().lineX * view.width, hot = performance.now() - GT.flash < 200;
     vctx.strokeStyle = hot ? '#fff' : '#ff8c1a'; vctx.lineWidth = hot ? 10 : 5;
     vctx.beginPath(); vctx.moveTo(lx, 0); vctx.lineTo(lx, view.height); vctx.stroke();
@@ -927,7 +981,7 @@ function ui(now) {
 }
 
 syncUI(); showCounts(); fit(); requestAnimationFrame(ui);
-window.__kzn = {T, S, demo}; // for debugging
+window.__kzn = {T, S, demo, GT, get S2() { return S; }}; // for debugging
 </script>
 </body>
 </html>

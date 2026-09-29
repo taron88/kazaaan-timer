@@ -50,6 +50,32 @@ input[type=range]{width:100%;accent-color:var(--acc)}
 .set{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;margin:10px 0}
 .set label{font-size:14px}
 .set output{font-size:14px;color:var(--acc);font-variant-numeric:tabular-nums}
+/* disguise mode: a generic social-feed look over the running app */
+#sns{position:fixed;inset:0;z-index:20;background:#000;color:#e7e9ea;overflow-y:auto;font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif;-webkit-user-select:none;user-select:none}
+#sns header{position:sticky;top:0;background:rgba(0,0,0,.85);backdrop-filter:blur(8px);border-bottom:1px solid #2f3336;z-index:2}
+#sns .top{display:flex;align-items:center;justify-content:center;height:48px;font-weight:700;font-size:18px;position:relative}
+#sns .me{position:absolute;left:16px;width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#6b8,#357)}
+#sns .tabs{display:flex}
+#sns .tabs div{flex:1;text-align:center;padding:12px 0;color:#71767b;font-size:15px}
+#sns .tabs div.on{color:#e7e9ea;font-weight:700;box-shadow:inset 0 -3px 0 #3b82f6}
+#sns .post{display:flex;gap:10px;padding:12px 16px;border-bottom:1px solid #2f3336}
+#sns .av{flex:0 0 40px;height:40px;border-radius:50%;position:relative}
+#sns .av .dot{position:absolute;right:-1px;bottom:-1px;width:12px;height:12px;border-radius:50%;background:#555;border:2px solid #000}
+#sns .av .dot.ok{background:#22c55e}
+#sns .body{flex:1;min-width:0}
+#sns .nm{font-size:15px}
+#sns .nm b{margin-right:4px}
+#sns .nm span{color:#71767b}
+#sns .tx{font-size:15px;line-height:1.5;margin-top:2px;white-space:pre-wrap}
+#sns .media{margin-top:10px;border-radius:14px;overflow:hidden;border:1px solid #2f3336;background:linear-gradient(135deg,#1e293b,#3b2f4a 60%,#4a3524)}
+#sns .media .pic{height:170px;display:flex;align-items:center;justify-content:center;font-size:44px;opacity:.9}
+#sns .media .bar{height:6px;background:rgba(255,255,255,.18)}
+#sns .media .bar i{display:block;height:100%;width:0;background:#3b82f6}
+#sns .acts{display:flex;justify-content:space-between;max-width:320px;margin-top:10px;color:#71767b;font-size:13px}
+#sns .acts span{display:inline-flex;align-items:center;gap:4px}
+#sns .heart{transition:color .15s,transform .15s}
+#sns .heart.hot{color:#f91880;transform:scale(1.35)}
+#sns nav{position:sticky;bottom:0;display:flex;justify-content:space-around;padding:10px 0 14px;background:#000;border-top:1px solid #2f3336;font-size:22px;color:#e7e9ea}
 .set input[type=range]{grid-column:1/3}
 .chk{display:flex;flex-wrap:wrap;gap:14px;margin:10px 0;font-size:15px}
 .chk input{transform:scale(1.3);margin-right:6px}
@@ -62,6 +88,14 @@ input[type=range]{width:100%;accent-color:var(--acc)}
 <div id="stage"><canvas id="view" width="960" height="540"></canvas><div id="hint">「カメラ開始」または「デモ」を押してください</div></div>
 <video id="video" playsinline muted autoplay></video>
 <div id="flash"></div>
+<div id="sns" hidden>
+  <header>
+    <div class="top"><div class="me"></div><span id="snsTitle">ホーム</span></div>
+    <div class="tabs"><div class="on">おすすめ</div><div>フォロー中</div></div>
+  </header>
+  <div id="feed"></div>
+  <nav><span>⌂</span><span>⌕</span><span>♡</span><span>✉</span></nav>
+</div>
 
 <div id="panel">
   <div class="status">
@@ -113,6 +147,8 @@ input[type=range]{width:100%;accent-color:var(--acc)}
   </section>
 
   <section>
+    <button id="bSns" style="width:100%;margin-bottom:12px">偽装モード（SNS風表示）に切り替え</button>
+    <p class="help" style="margin-top:-4px">一番上の投稿の再生バーが右端まで伸びてハートが光った瞬間が「押す」です（バイブ付き）。アイコンの緑の点＝打てる速度。戻るときは上部の「ホーム」を3回タップ。</p>
     <h3>3. タイミング調整</h3>
     <div class="offrow">
       <button id="early">早かった</button>
@@ -322,7 +358,8 @@ function lineProcess(t) {
   for (let x = Math.max(0, Math.round(lx - hw)); x <= Math.min(PW - 1, Math.round(lx + hw)); x++) { p += col[x]; n++; }
   p /= n;
   const P = GT.pres ||= {max: 0, on: false, ts: 0, lastOn: 0, durs: []};
-  P.max = Math.max(p, P.max * 0.9995);
+  // (before the fixed gold is learned, all gold looks "moving"; don't let that set the scale)
+  if (T.lineWarm) P.max = Math.max(p, P.max * 0.9995);
   // (from afar the UP covers only a few rows of the frame, so the absolute floor is low)
   const on = T.lineWarm && p > 0.004 && p > P.max * 0.4; // wait until fixed gold has been learned
   T.lineP = p; T.lineOn = on;
@@ -558,7 +595,7 @@ function beep(tMs, last) {
   o.connect(g).connect(actx.destination); o.start(at); o.stop(at + len + 0.05);
   return o;
 }
-function doFlash() { const f = $('#flash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on'))); }
+function doFlash() { if (stealth) return; const f = $('#flash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on'))); }
 function ensureAudio() {
   if (!actx) try { actx = new (window.AudioContext || window.webkitAudioContext)({latencyHint: 'interactive'}); } catch (e) {}
   if (actx && actx.state === 'suspended') actx.resume();
@@ -933,7 +970,57 @@ function prepCanvas(c) {
   return [c.getContext('2d'), w, h, dpr];
 }
 let lastTxt = 0;
+// ---------- disguise mode (generic social feed; the app keeps running underneath) ----------
+let stealth = false;
+const FEED = [
+  ['ゆう', 'yu_days', '#f59e0b', '今日のランチ当たりだった。また行きたい', '🍜'],
+  ['みさき', 'misaki_0312', '#ec4899', '明日は雨らしいから洗濯は今日のうちに…'],
+  ['たけし', 'take_camera', '#10b981', '夕方の空がきれいすぎた', '🌇'],
+  ['ねこ部', 'nekobu_daily', '#8b5cf6', 'うちの猫、段ボール入ったまま寝てる'],
+  ['はる', 'haru_run', '#0ea5e9', '5km走った。脚が重い'],
+  ['こうへい', 'kohei_game', '#f97316', '新作ゲームの体験版、思ったより面白い', '🎮'],
+  ['あや', 'aya_cafe', '#14b8a6', '駅前に新しいカフェできてた☕'],
+  ['しょう', 'sho_music', '#6366f1', '久しぶりにライブ行きたいなあ'],
+  ['りな', 'rina_bake', '#e11d48', 'パウンドケーキ焼いた。ちょっと焦げた', '🍰'],
+  ['だい', 'dai_trip', '#84cc16', '週末どこか遠出したい'],
+];
+function buildFeed() {
+  const n = () => Math.floor(Math.random() * 90) + 3;
+  $('#feed').innerHTML = FEED.map((p, i) => `
+    <div class="post">
+      <div class="av" style="background:${p[2]}">${i === 0 ? '<div class="dot" id="snsDot"></div>' : ''}</div>
+      <div class="body">
+        <div class="nm"><b>${p[0]}</b><span>@${p[1]} · ${i + 1}時間</span></div>
+        <div class="tx">${p[3]}</div>
+        ${p[4] || i === 0 ? `<div class="media"><div class="pic">${p[4] || '🎬'}</div>${i === 0 ? '<div class="bar"><i id="snsBar"></i></div>' : ''}</div>` : ''}
+        <div class="acts"><span>💬 ${n()}</span><span>🔁 ${n()}</span><span class="heart" ${i === 0 ? 'id="snsHeart"' : ''}>♥ ${n() * 3}</span><span>📊 ${n() * 40}</span></div>
+      </div>
+    </div>`).join('');
+}
+function setStealth(on) {
+  stealth = on; $('#sns').hidden = !on;
+  document.title = on ? 'ホーム' : 'カザーン タイミング';
+  if (on) { buildFeed(); $('#sns').scrollTop = 0; }
+}
+$('#bSns').onclick = () => { ensureAudio(); setStealth(true); };
+let snsTaps = [];
+$('#snsTitle').addEventListener('click', () => { // triple tap on the title returns to the normal screen
+  const n = performance.now(); snsTaps = snsTaps.filter(x => n - x < 800); snsTaps.push(n);
+  if (snsTaps.length >= 3) { snsTaps = []; setStealth(false); }
+});
+function snsUpdate(now) {
+  const bar = $('#snsBar'), heart = $('#snsHeart'), dot = $('#snsDot');
+  if (!bar) return;
+  dot.classList.toggle('ok', speedOk());
+  const span = (S.beeps - 1) * S.beepGap + 300;
+  // the "video" progress reaches the right end exactly at the moment to press
+  const p = plan && plan.F >= now ? Math.min(1, Math.max(0, 1 - (plan.F - now) / span)) : 0;
+  bar.style.width = (p * 100).toFixed(1) + '%';
+  heart.classList.toggle('hot', !!plan && now >= plan.F - 30 && now < plan.F + 400);
+}
+
 function ui(now) {
+  if (stealth) snsUpdate(now);
   const ok = speedOk();
   if (now - lastTxt > 100) {
     lastTxt = now;

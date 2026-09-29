@@ -100,7 +100,7 @@ input[type=range]{width:100%;accent-color:var(--acc)}
       <button data-mode="target">③ 落下位置</button>
       <button data-mode="gate" id="bGate">④ 検知位置</button>
     </div>
-    <div class="offrow" style="margin-top:8px"><span id="lockSt" style="flex:1;font-size:14px;color:var(--mut)">カメラ: 自動</span><button id="bLock" style="flex:0 0 auto">カメラを固定</button></div>
+    <div class="offrow" style="margin-top:8px"><span id="lockSt" style="flex:1;font-size:14px;color:var(--mut)">カメラ: 自動</span><button id="bLock" style="flex:0 0 auto">カメラを固定</button><button id="bColorDef" style="flex:0 0 auto">色を標準に戻す</button></div>
     <div class="set"><label>計測方式</label><span></span>
       <select data-k="method" style="grid-column:1/3;font-size:16px;padding:8px;background:#2a2a2a;color:var(--fg);border:1px solid #444;border-radius:8px">
         <option value="line">中央ライン（縦線をUPが通る間隔）※おすすめ</option>
@@ -156,7 +156,9 @@ const proc = document.createElement('canvas'), pctx = proc.getContext('2d', {wil
 const D2R = Math.PI / 180;
 
 // ---------- settings ----------
-const DEF = {src: {}, hue: 48, hueTol: 14, satMin: 0.40, valMin: 0.45, offset: 600, slowThr: 0.93,
+// default UP colour: best of a grid search over three real recordings (93 UPs; 0 missed)
+const COLOR_DEF = {hue: 48, hueTol: 14, satMin: 0.45, valMin: 0.20};
+const DEF = {src: {}, ...COLOR_DEF, offset: 600, slowThr: 0.93,
   pockets: 24, ups: 8, sound: true, vib: true, flash: true, onlySlow: true, beeps: 3, beepGap: 350,
   showMask: true, win: 700, method: 'line', lineW: 0.3};
 let S = structuredClone(DEF);
@@ -335,16 +337,18 @@ function lineProcess(t) {
       P.durs.push(d); if (P.durs.length > 9) P.durs.shift();
       T.lastDur = d;
       const tc = (P.ts + P.lastOn) / 2; // centre of the UP = middle of its time on the line
-      onCross(tc, -1, 0);
-      // ring distance between two UPs (3 pockets), measured with the motion estimate
       const xc = flowXAt(tc), U = GT.upX ||= [];
-      if (U.length) {
+      // The ring has not travelled far enough since the last UP: a lighting flash turning
+      // the frame yellow, not an UP. Don't let it move the prediction.
+      const tooSoon = GT.upP && U.length && Math.abs(xc - U[U.length - 1]) < GT.upP * 0.7;
+      if (!tooSoon) onCross(tc, -1, 0);
+      // ring distance between two UPs (3 pockets), measured with the motion estimate
+      if (tooSoon) { /* ignored */ } else if (U.length) {
         let d = Math.abs(xc - U[U.length - 1]);
         if (GT.upP && d > GT.upP * 1.6) d /= Math.round(d / GT.upP); // an UP was missed in between
         if (d > 0.05) GT.upP = GT.upP ? GT.upP + (d - GT.upP) * 0.3 : d;
       }
-      U.push(xc); if (U.length > 10) U.shift();
-      GT.upT = tc;
+      if (!tooSoon) { U.push(xc); if (U.length > 10) U.shift(); GT.upT = tc; }
     }
   }
   // Speed from the motion estimate, every frame (the UP-to-UP interval lags a speed change)
@@ -883,6 +887,10 @@ $('#hit').onclick = () => { counts.hit++; showCounts(); };
 $('#rstc').onclick = () => { counts.hit = counts.early = counts.late = 0; showCounts(); };
 $('#off').oninput = e => setOffset(+e.target.value);
 $('#bCam').onclick = startCamera;
+$('#bColorDef').onclick = () => {
+  Object.assign(S, COLOR_DEF); save(); syncUI(); resetTracking();
+  hint(`UP色を標準（色相${S.hue}°±${S.hueTol}、彩度${S.satMin}以上、明度${S.valMin}以上）に戻しました`);
+};
 $('#bLock').onclick = async () => {
   if (source !== 'camera') return hint('カメラ使用中のみ固定できます');
   hint(await lockCamera(!camLocked));

@@ -70,6 +70,7 @@ input[type=range]{width:100%;accent-color:var(--acc)}
 #sns .tx{font-size:15px;line-height:1.5;margin-top:2px;white-space:pre-wrap}
 #sns .media{margin-top:10px;border-radius:14px;overflow:hidden;border:1px solid #2f3336;background:linear-gradient(135deg,#1e293b,#3b2f4a 60%,#4a3524)}
 #sns .media .pic{height:170px;display:flex;align-items:center;justify-content:center;font-size:44px;opacity:.9}
+#sns .media .chart{display:block;width:100%;height:170px}
 #sns .media .bar{height:6px;background:rgba(255,255,255,.18)}
 #sns .media .bar i{display:block;height:100%;width:0;background:#3b82f6}
 #sns .acts{display:flex;justify-content:space-between;max-width:320px;margin-top:10px;color:#71767b;font-size:13px}
@@ -994,7 +995,10 @@ function buildFeed() {
       <div class="body">
         <div class="nm"><b>${p[0]}</b><span>@${p[1]} · ${i + 1}時間</span></div>
         <div class="tx">${p[3]}</div>
-        ${p[4] || i === 0 ? `<div class="media"><div class="pic">${p[4] || '🎬'}</div>${i === 0 ? '<div class="bar"><i id="snsBar"></i></div>' : ''}</div>` : ''}
+        ${p[4] || i === 0 ? `<div class="media">${
+          i === 0 ? '<canvas class="chart" id="snsG1"></canvas>' :   // speed, last 20 s
+          i === 2 ? '<canvas class="chart" id="snsG2"></canvas>' :   // speed, last 60 s
+          `<div class="pic">${p[4]}</div>`}${i === 0 ? '<div class="bar"><i id="snsBar"></i></div>' : ''}</div>` : ''}
         <div class="acts"><span>💬 ${n()}</span><span>🔁 ${n()}</span><span class="heart" ${i === 0 ? 'id="snsHeart"' : ''}>♥ ${n() * 3}</span><span ${i === 0 ? 'id="snsViews"' : ''}>📊 ${n() * 40}</span></div>
       </div>
     </div>`).join('');
@@ -1015,6 +1019,11 @@ function snsUpdate(now) {
   if (!bar) return;
   dot.classList.toggle('ok', speedOk());
   // speed tier as a "trend" word, and seconds-per-pocket × 1000 as the view count
+  if (!snsUpdate.g || now - snsUpdate.g > 100) { // speed charts in the 1st (20 s) and 3rd (60 s) posts
+    snsUpdate.g = now;
+    drawSpeedGraph($('#snsG1'), now, 20000, {color: '#f59e0b'});
+    drawSpeedGraph($('#snsG2'), now, 60000, {color: '#f59e0b'});
+  }
   if (!snsUpdate.t || now - snsUpdate.t > 200) {
     snsUpdate.t = now;
     const has = T.fitOk && isFinite(T.spp);
@@ -1065,24 +1074,29 @@ function ui(now) {
     }
   }
   c.fillStyle = '#9a9a9a'; c.font = `${12 * dpr}px sans-serif`; c.fillText('押す', px + 8 * dpr, 16 * dpr);
-  // speed graph
-  const [g, gw, gh] = prepCanvas($('#graph'));
+  drawSpeedGraph($('#graph'), now, 60000, {label: '速度（直近60秒・上ほど遅い）'});
+  requestAnimationFrame(ui);
+}
+
+// Speed history (seconds per pocket; higher = slower) with the "playable" threshold line.
+function drawSpeedGraph(cv, now, span, o = {}) {
+  const [g, gw, gh, dpr] = prepCanvas(cv);
   g.clearRect(0, 0, gw, gh);
   const lo = 0.55, hi = 1.15, Y = v => gh - (Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo) * gh;
   g.strokeStyle = '#3ddc84'; g.setLineDash([4 * dpr, 4 * dpr]); g.beginPath(); g.moveTo(0, Y(S.slowThr)); g.lineTo(gw, Y(S.slowThr)); g.stroke(); g.setLineDash([]);
   // band mode updates every frame; crossing modes about every 2–3 s, so allow longer gaps there
-  const maxGap = S.method === 'band' ? 400 : 8000;
-  g.strokeStyle = '#f5c542'; g.lineWidth = 2 * dpr; g.beginPath(); let prevT = -1e9;
+  const maxGap = S.method === 'band' ? 400 : 8000, col = o.color || '#f5c542';
+  g.strokeStyle = col; g.lineWidth = 2 * dpr; g.beginPath(); let prevT = -1e9;
   for (const p of T.sppHist) {
-    const x = gw - (now - p.t) / 60000 * gw;
+    if (now - p.t > span) continue;
+    const x = gw - (now - p.t) / span * gw;
     if (p.t - prevT > maxGap) g.moveTo(x, Y(p.v)); else g.lineTo(x, Y(p.v));
     prevT = p.t;
   }
   g.stroke(); g.lineWidth = 1;
-  g.fillStyle = '#f5c542';
-  if (S.method !== 'band') for (const p of T.sppHist) { const x = gw - (now - p.t) / 60000 * gw; g.beginPath(); g.arc(x, Y(p.v), 3 * dpr, 0, Math.PI * 2); g.fill(); }
-  g.fillStyle = '#9a9a9a'; g.font = `${11 * dpr}px sans-serif`; g.fillText('速度（直近60秒・上ほど遅い）', 6 * dpr, 14 * dpr);
-  requestAnimationFrame(ui);
+  g.fillStyle = col;
+  if (S.method !== 'band') for (const p of T.sppHist) { if (now - p.t > span) continue; const x = gw - (now - p.t) / span * gw; g.beginPath(); g.arc(x, Y(p.v), 2.5 * dpr, 0, Math.PI * 2); g.fill(); }
+  if (o.label) { g.fillStyle = '#9a9a9a'; g.font = `${11 * dpr}px sans-serif`; g.fillText(o.label, 6 * dpr, 14 * dpr); }
 }
 
 syncUI(); showCounts(); fit(); requestAnimationFrame(ui);
